@@ -1,6 +1,6 @@
 # opencode-usage-total 🧠
 
-Seguí el uso de modelos, tokens y costos por agente en la barra lateral de OpenCode.
+Realiza el seguimiento de modelos, tokens y costos por agente en la barra lateral de OpenCode.
 
 ![version](https://img.shields.io/badge/version-0.1.0-muted)
 
@@ -19,7 +19,7 @@ Seguí el uso de modelos, tokens y costos por agente en la barra lateral de Open
 opencode plugin install opencode-usage-total
 ```
 
-O agregalo manualmente en `tui.json`:
+O agrégalo manualmente en `tui.json`:
 
 ```json
 {
@@ -29,9 +29,9 @@ O agregalo manualmente en `tui.json`:
 
 ## Uso
 
-Abrí una sesión en OpenCode. La barra lateral muestra una sección colapsable **🧠 Models** con cada modelo usado en la sesión actual.
+Abre una sesión en OpenCode. La barra lateral muestra una sección colapsable **🧠 Models** con cada modelo usado en la sesión actual.
 
-Presioná `Alt+M` para colapsar o expandir la lista.
+Presiona `Alt+M` para colapsar o expandir la lista.
 
 ![sidebar](https://github.com/AlonsoSG0/opencode-usage-total/raw/main/image.png)
 

@@ -1,0 +1,40 @@
+{
+  "name": "opencode-usage-total",
+  "version": "0.1.0",
+  "description": "Track model usage, tokens, and costs per agent in the OpenCode TUI sidebar",
+  "type": "module",
+  "main": "index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./runtime": "./usage-total.ts"
+  },
+  "files": [
+    "index.ts",
+    "usage-total.ts",
+    "usage-total-tui.tsx",
+    "image.png",
+    "README.md",
+    "README.en.md"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "tui",
+    "usage",
+    "tokens",
+    "cost",
+    "models"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AlonsoSG0/opencode-usage-total"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.17.8",
+    "@opentui/core": "^0.4.1",
+    "@opentui/keymap": "^0.4.1",
+    "@opentui/solid": "^0.4.1",
+    "solid-js": "^1.9.12"
+  }
+}

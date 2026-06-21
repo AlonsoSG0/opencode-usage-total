@@ -2,26 +2,19 @@
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { createRoot, createSignal } from "solid-js"
 import { version } from "./package.json"
+import {
+  type ModelEntry,
+  type ModelEntryKey,
+  fmtCost,
+  fmtTokens,
+  modelTokens,
+  roundCost,
+  safeNum,
+} from "./helpers"
 
 // ---- Constants ----
 const DEFAULT_AGENT = "primary"
 const UNKNOWN_ID = "?"
-
-interface ModelEntry {
-  provider: string
-  model: string
-  agent: string
-  cost: number
-  tokensInput: number
-  tokensOutput: number
-  tokensReasoning: number
-  messageCount: number
-}
-
-type ModelEntryKey = Omit<
-  ModelEntry,
-  "cost" | "tokensInput" | "tokensOutput" | "tokensReasoning" | "messageCount"
->
 
 // ---- Helpers ----
 function resolveRouteSessionID(api: TuiPluginApi): string | undefined {
@@ -33,35 +26,6 @@ function resolveRouteSessionID(api: TuiPluginApi): string | undefined {
   return undefined
 }
 
-function modelTokens(m: ModelEntry): number {
-  return m.tokensInput + m.tokensOutput + m.tokensReasoning
-}
-
-function safeNum(value: unknown): number {
-  const n = typeof value === "number" ? value : Number(value)
-  return Number.isFinite(n) ? n : 0
-}
-
-// W1: Round accumulated cost to prevent floating-point drift compounding
-// over long sessions (0.1 + 0.2 = 0.30000000000000004 in JS). 6 decimal
-// places is well below the 4-place display floor, so no visible precision loss.
-function roundCost(n: number): number {
-  return safeNum(Number(n.toFixed(6)))
-}
-
-function fmtTokens(n: number): string {
-  if (!Number.isFinite(n) || n === 0) return "0"
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-  return String(Math.round(n))
-}
-
-function fmtCost(n: number): string {
-  if (!Number.isFinite(n) || n === 0) return ""
-  if (n < 0.01) return `$${n.toFixed(4)}`
-  return `$${n.toFixed(2)}`
-}
-
 // ---- Plugin ----
 // C3: module-level init guard. Without this, a reload that happens
 // without a prior dispose (loader bug, process crash, or a missing
@@ -70,6 +34,12 @@ function fmtCost(n: number): string {
 // tokens accumulate N×, and `saveSession` writes the inflated values to
 // KV — corruption that survives restarts because KV persists.
 let initialized = false
+
+// W7: rate-limit new-model toasts. Sub-agent fan-out can surface many
+// distinct models within a few hundred milliseconds, producing a toast
+// storm that buries the TUI. A simple 2-second cooldown window collapses
+// the burst into at most one notification per window.
+let lastToastTime = 0
 
 const tui: TuiPlugin = async (api) => {
   // C3: refuse to re-initialize while a previous instance is active.
@@ -211,7 +181,26 @@ const tui: TuiPlugin = async (api) => {
         if (loadedSessions.has(sessionID)) return
         loadedSessions.add(sessionID)
         const saved = api.kv?.get?.<ModelEntry[]>(kvKey(sessionID))
+        // W9: validate the shape of KV-loaded data before injecting it.
+        // KV is persistent and could hold a value written by an older
+        // schema version or corrupted by a failed write — trusting it
+        // blindly would render garbage in the sidebar or crash the slot.
         if (saved && saved.length > 0) {
+          const valid =
+            Array.isArray(saved) &&
+            typeof saved[0].provider === "string" &&
+            typeof saved[0].model === "string" &&
+            typeof saved[0].agent === "string"
+          if (!valid) {
+            api.ui?.toast?.({
+              message: "usage-total: discarded corrupt saved model data",
+              variant: "warning",
+            })
+            // Clear the corrupted key so we don't re-evaluate garbage on
+            // every render that touches this session.
+            api.kv?.set?.(kvKey(sessionID), undefined)
+            return
+          }
           setModelState((current) => ({ ...current, [sessionID]: saved }))
         }
       }
@@ -220,7 +209,13 @@ const tui: TuiPlugin = async (api) => {
         sessionID: string,
         entry: ModelEntryKey,
         cost: number,
-        tokens: { input?: number; output?: number; reasoning?: number },
+        tokens: {
+          input?: number
+          output?: number
+          reasoning?: number
+          cacheRead?: number
+          cacheWrite?: number
+        },
       ) {
         const dedupeKey = `${entry.provider}/${entry.model}/${entry.agent}`
         const current = modelState()
@@ -234,6 +229,8 @@ const tui: TuiPlugin = async (api) => {
         const safeInput = safeNum(tokens.input)
         const safeOutput = safeNum(tokens.output)
         const safeReasoning = safeNum(tokens.reasoning)
+        const safeCacheRead = safeNum(tokens.cacheRead)
+        const safeCacheWrite = safeNum(tokens.cacheWrite)
 
         if (existingIdx >= 0) {
           const existing = sessionModels[existingIdx]
@@ -243,6 +240,10 @@ const tui: TuiPlugin = async (api) => {
             tokensInput: safeNum(existing.tokensInput + safeInput),
             tokensOutput: safeNum(existing.tokensOutput + safeOutput),
             tokensReasoning: safeNum(existing.tokensReasoning + safeReasoning),
+            tokensCacheRead: safeNum(existing.tokensCacheRead + safeCacheRead),
+            tokensCacheWrite: safeNum(
+              existing.tokensCacheWrite + safeCacheWrite,
+            ),
             messageCount: existing.messageCount + 1,
           }
         } else {
@@ -252,6 +253,8 @@ const tui: TuiPlugin = async (api) => {
             tokensInput: safeInput,
             tokensOutput: safeOutput,
             tokensReasoning: safeReasoning,
+            tokensCacheRead: safeCacheRead,
+            tokensCacheWrite: safeCacheWrite,
             messageCount: 1,
           })
         }
@@ -270,21 +273,44 @@ const tui: TuiPlugin = async (api) => {
         eventSessionID: string,
         entry: ModelEntryKey,
         cost: number,
-        tokens: { input?: number; output?: number; reasoning?: number },
+        tokens: {
+          input?: number
+          output?: number
+          reasoning?: number
+          cacheRead?: number
+          cacheWrite?: number
+        },
       ) {
         const isNew = upsertModel(eventSessionID, entry, cost, tokens)
-        if (isNew) {
+        // W7: only one new-model toast per 2-second window so sub-agent
+        // fan-out doesn't flood the toast layer with a toast storm.
+        if (isNew && Date.now() - lastToastTime > 2000) {
+          lastToastTime = Date.now()
           api.ui?.toast?.({
             message: `${entry.agent}: ${entry.model}`,
             variant: "success",
           })
         }
 
-        // Attribute sub-agent models to the parent session so they
-        // appear in the main session sidebar.
-        const session = api.state?.session?.get?.(eventSessionID)
-        if (session?.parentID && session.parentID !== eventSessionID) {
-          upsertModel(session.parentID, entry, cost, tokens)
+        // W4: Attribute sub-agent models to the ROOT session, not just
+        // the immediate parent. The previous depth-1 logic left nested
+        // sub-agents (grandchildren) invisible in the main sidebar.
+        // Walk up the parent chain to find the root, then upsert there.
+        let cursor = eventSessionID
+        const visited = new Set<string>()
+        while (true) {
+          visited.add(cursor)
+          const sess = api.state?.session?.get?.(cursor)
+          if (
+            !sess?.parentID ||
+            sess.parentID === cursor ||
+            visited.has(sess.parentID)
+          )
+            break
+          cursor = sess.parentID
+        }
+        if (cursor !== eventSessionID) {
+          upsertModel(cursor, entry, cost, tokens)
         }
       }
 
@@ -299,7 +325,13 @@ const tui: TuiPlugin = async (api) => {
         let model: string
         let agent: string
         let cost = 0
-        let tokens: { input?: number; output?: number; reasoning?: number } = {}
+        let tokens: {
+          input?: number
+          output?: number
+          reasoning?: number
+          cacheRead?: number
+          cacheWrite?: number
+        } = {}
 
         if (info.role === "user") {
           const mdl = info.model
@@ -315,6 +347,8 @@ const tui: TuiPlugin = async (api) => {
             input: safeNum(info.tokens?.input),
             output: safeNum(info.tokens?.output),
             reasoning: safeNum(info.tokens?.reasoning),
+            cacheRead: safeNum(info.tokens?.cache?.read),
+            cacheWrite: safeNum(info.tokens?.cache?.write),
           }
         } else {
           return

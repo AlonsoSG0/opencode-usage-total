@@ -1,11 +1,15 @@
 {
   "name": "opencode-usage-total",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Track model usage, tokens, and costs per agent in the OpenCode TUI sidebar",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "./dist/index.js",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./tui": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
@@ -40,14 +44,18 @@
     "test:run": "vitest run",
     "prepublishOnly": "npm run build"
   },
-  "dependencies": {
-    "@opentui/solid": "^0.4.1",
-    "solid-js": "^1.9.12"
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.14.50 <2",
+    "@opentui/core": ">=0.4.0 <0.5",
+    "@opentui/solid": ">=0.4.0 <0.5",
+    "solid-js": ">=1.9.12 <2"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.17.8",
     "@opentui/core": "^0.4.1",
     "@opentui/keymap": "^0.4.1",
+    "@opentui/solid": "^0.4.1",
+    "solid-js": "^1.9.12",
     "tsup": "^8.5.1",
     "vitest": "^4.1.9"
   }

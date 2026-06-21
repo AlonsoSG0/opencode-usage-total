@@ -1,6 +1,6 @@
 {
   "name": "opencode-usage-total",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Track model usage, tokens, and costs per agent in the OpenCode TUI sidebar",
   "type": "module",
   "main": "./dist/index.js",

@@ -312,9 +312,10 @@ describe("debounce + flush", () => {
 
     // Three rapid events for the same session/model accumulate in state but
     // each scheduleSave resets the debounce timer, so only one KV write fires.
-    handler(assistantEvent("s1"))
-    handler(assistantEvent("s1"))
-    handler(assistantEvent("s1"))
+    // Distinct message IDs so the dedup guard doesn't skip them.
+    handler(assistantEvent("s1", { id: "msg-a" }))
+    handler(assistantEvent("s1", { id: "msg-b" }))
+    handler(assistantEvent("s1", { id: "msg-c" }))
 
     expect(m.kvSet).not.toHaveBeenCalled()
     vi.advanceTimersByTime(500)
@@ -514,10 +515,47 @@ describe("message.updated handler", () => {
     ).toBe(true)
 
     // A second, healthy event is still processed by the same subscription.
-    handler(assistantEvent("s1", { modelID: "claude-haiku" }))
+    // Distinct message ID so the dedup guard doesn't skip it.
+    handler(assistantEvent("s1", { id: "msg-2", modelID: "claude-haiku" }))
     vi.advanceTimersByTime(500)
 
     expect(modelsSavedFor(m, "s1")).toBeDefined()
+  })
+
+  it("skips duplicate message IDs to prevent double-counting", async () => {
+    const m = makeMockApi()
+    await init(m)
+    const handler = getHandler(m)!
+
+    // First event processes normally
+    handler(assistantEvent("s1", { id: "dup-1" }))
+    // Same message ID again -> skipped
+    handler(assistantEvent("s1", { id: "dup-1" }))
+    // Different message ID -> processed
+    handler(
+      assistantEvent("s1", { id: "dup-2", cost: 0.02, tokens: { input: 50, output: 100 } }),
+    )
+    vi.advanceTimersByTime(500)
+
+    const models = modelsSavedFor(m, "s1")!
+    expect(models).toHaveLength(1)
+    // Only first + third events accumulated (second was skipped)
+    expect(models[0].cost).toBe(0.03) // 0.01 + 0.02
+    expect(models[0].tokensInput).toBe(150) // 100 + 50
+    expect(models[0].tokensOutput).toBe(300) // 200 + 100
+  })
+
+  it("processes events without an ID (no dedup guard)", async () => {
+    const m = makeMockApi()
+    await init(m)
+    const handler = getHandler(m)!
+
+    handler(assistantEvent("s1", { id: undefined }))
+    vi.advanceTimersByTime(500)
+
+    const models = modelsSavedFor(m, "s1")!
+    expect(models).toHaveLength(1)
+    expect(models[0].cost).toBe(0.01)
   })
 })
 
@@ -543,8 +581,8 @@ describe("upsertModel", () => {
     await init(m)
     const handler = getHandler(m)!
 
-    handler(assistantEvent("s1"))
-    handler(assistantEvent("s1"))
+    handler(assistantEvent("s1", { id: "msg-1" }))
+    handler(assistantEvent("s1", { id: "msg-2" }))
     vi.advanceTimersByTime(500)
 
     const models = modelsSavedFor(m, "s1")!

@@ -129,6 +129,10 @@ const tui: TuiPlugin = async (api) => {
         api.kv?.get?.<boolean>(EXPANDED_KV_KEY, true) !== false,
       )
 
+      // Dedup: track processed message IDs to prevent double-counting
+      // when message.updated fires multiple times for the same message.
+      const processedMessages = new Set<string>()
+
       // Register keyboard shortcut to toggle section
       const TOGGLE_CMD = "usage-total.toggle-section"
       keymapDispose = api.keymap?.registerLayer
@@ -353,6 +357,10 @@ const tui: TuiPlugin = async (api) => {
         try {
           const info = event?.properties?.info
           if (!info) return
+
+          // Skip already-processed messages to prevent double-counting
+          if (info.id && processedMessages.has(info.id)) return
+          if (info.id) processedMessages.add(info.id)
 
           const eventSessionID = info.sessionID
           if (!eventSessionID) return

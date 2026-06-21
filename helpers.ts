@@ -71,12 +71,16 @@ export function fmtCost(n: number): string {
 // W5: cache tokens (cache.read / cache.write) are included in the total.
 // In long-context sessions, cache reads often dominate token usage, so
 // excluding them made the sidebar show fewer tokens than actually used.
+// C4: wrap the sum in safeNum so a corrupt KV entry (or a future code path
+// that bypasses upsert sanitization) can never push NaN/Infinity into the
+// render — modelTokens is called directly in the sidebar render, where a
+// NaN would propagate into fmtTokens and the total reduce unchecked.
 export function modelTokens(m: ModelEntry): number {
-  return (
+  return safeNum(
     m.tokensInput +
-    m.tokensOutput +
-    m.tokensReasoning +
-    m.tokensCacheRead +
-    m.tokensCacheWrite
+      m.tokensOutput +
+      m.tokensReasoning +
+      m.tokensCacheRead +
+      m.tokensCacheWrite,
   )
 }

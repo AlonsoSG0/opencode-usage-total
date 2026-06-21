@@ -88,6 +88,10 @@ const tui: TuiPlugin = async (api) => {
       /* best-effort teardown */
     }
     initialized = false
+    // W1: reset the toast rate-limit window so a reload starts fresh instead
+    // of inheriting the previous instance's lastToastTime, which could
+    // suppress the first new-model toast of the new session.
+    lastToastTime = 0
   }
 
   try {
@@ -100,6 +104,14 @@ const tui: TuiPlugin = async (api) => {
     // above for reload safety.
     if (api.lifecycle?.onDispose) {
       api.lifecycle.onDispose(cleanup)
+    }
+    // W3: if onDispose is unavailable, fall back to the lifecycle AbortSignal
+    // so a dispose still resets `initialized`. Without this, a host that only
+    // emits the abort signal (or where onDispose was dropped) would never
+    // reset the guard and a reload would be permanently locked out by the
+    // "already loaded" early return above.
+    if (!api.lifecycle?.onDispose && api.lifecycle?.signal) {
+      api.lifecycle.signal.addEventListener("abort", cleanup, { once: true })
     }
 
     createRoot((dispose) => {
@@ -186,11 +198,28 @@ const tui: TuiPlugin = async (api) => {
         // schema version or corrupted by a failed write — trusting it
         // blindly would render garbage in the sidebar or crash the slot.
         if (saved && saved.length > 0) {
+          // B2: validate EVERY entry, not just saved[0]. KV is persistent and
+          // could hold an array where the first entry is well-formed but a
+          // later one is corrupt (partial write, schema migration, etc.).
+          // Also enforce the numeric fields: a non-finite cost/tokens value
+          // would poison the render accumulators (modelTokens/totalCost) and
+          // silently re-persist on the next debounced save. Reject the whole
+          // array if ANY entry fails — clear the key so we don't re-evaluate
+          // garbage on every render that touches this session.
           const valid =
             Array.isArray(saved) &&
-            typeof saved[0].provider === "string" &&
-            typeof saved[0].model === "string" &&
-            typeof saved[0].agent === "string"
+            saved.every(
+              (m) =>
+                typeof m?.provider === "string" &&
+                typeof m?.model === "string" &&
+                typeof m?.agent === "string" &&
+                Number.isFinite(m?.cost) &&
+                Number.isFinite(m?.tokensInput) &&
+                Number.isFinite(m?.tokensOutput) &&
+                Number.isFinite(m?.tokensReasoning) &&
+                Number.isFinite(m?.tokensCacheRead) &&
+                Number.isFinite(m?.tokensCacheWrite),
+            )
           if (!valid) {
             api.ui?.toast?.({
               message: "usage-total: discarded corrupt saved model data",
@@ -234,6 +263,10 @@ const tui: TuiPlugin = async (api) => {
 
         if (existingIdx >= 0) {
           const existing = sessionModels[existingIdx]
+          // W2: cost uses roundCost (not just safeNum) because cost is
+          // fractional and accumulates float drift (0.1 + 0.2); tokens are
+          // integers, so safeNum alone is enough to guard NaN/Infinity
+          // without rounding.
           sessionModels[existingIdx] = {
             ...existing,
             cost: roundCost(existing.cost + safeCost),
@@ -313,46 +346,57 @@ const tui: TuiPlugin = async (api) => {
       }
 
       unsub = api.event?.on?.("message.updated", (event) => {
-        const info = event?.properties?.info
-        if (!info) return
+        // W4: error boundary around the handler. A throw here (bad event
+        // shape, a state-layer read blowing up, etc.) would otherwise
+        // propagate and kill the subscription for the rest of the session.
+        // Toast a warning and keep the listener alive rather than rethrowing.
+        try {
+          const info = event?.properties?.info
+          if (!info) return
 
-        const eventSessionID = info.sessionID
-        if (!eventSessionID) return
+          const eventSessionID = info.sessionID
+          if (!eventSessionID) return
 
-        let provider: string
-        let model: string
-        let agent: string
-        let cost = 0
-        let tokens: {
-          input?: number
-          output?: number
-          reasoning?: number
-          cacheRead?: number
-          cacheWrite?: number
-        } = {}
+          let provider: string
+          let model: string
+          let agent: string
+          let cost = 0
+          let tokens: {
+            input?: number
+            output?: number
+            reasoning?: number
+            cacheRead?: number
+            cacheWrite?: number
+          } = {}
 
-        if (info.role === "user") {
-          const mdl = info.model
-          provider = mdl?.providerID ?? UNKNOWN_ID
-          model = mdl?.modelID ?? UNKNOWN_ID
-          agent = info.agent ?? DEFAULT_AGENT
-        } else if (info.role === "assistant") {
-          provider = info.providerID ?? UNKNOWN_ID
-          model = info.modelID ?? UNKNOWN_ID
-          agent = info.agent ?? info.mode ?? DEFAULT_AGENT
-          cost = safeNum(info.cost)
-          tokens = {
-            input: safeNum(info.tokens?.input),
-            output: safeNum(info.tokens?.output),
-            reasoning: safeNum(info.tokens?.reasoning),
-            cacheRead: safeNum(info.tokens?.cache?.read),
-            cacheWrite: safeNum(info.tokens?.cache?.write),
+          if (info.role === "user") {
+            const mdl = info.model
+            provider = mdl?.providerID ?? UNKNOWN_ID
+            model = mdl?.modelID ?? UNKNOWN_ID
+            agent = info.agent ?? DEFAULT_AGENT
+          } else if (info.role === "assistant") {
+            provider = info.providerID ?? UNKNOWN_ID
+            model = info.modelID ?? UNKNOWN_ID
+            agent = info.agent ?? info.mode ?? DEFAULT_AGENT
+            cost = safeNum(info.cost)
+            tokens = {
+              input: safeNum(info.tokens?.input),
+              output: safeNum(info.tokens?.output),
+              reasoning: safeNum(info.tokens?.reasoning),
+              cacheRead: safeNum(info.tokens?.cache?.read),
+              cacheWrite: safeNum(info.tokens?.cache?.write),
+            }
+          } else {
+            return
           }
-        } else {
-          return
-        }
 
-        trackModel(eventSessionID, { provider, model, agent }, cost, tokens)
+          trackModel(eventSessionID, { provider, model, agent }, cost, tokens)
+        } catch {
+          api.ui?.toast?.({
+            message: "usage-total: error processing message",
+            variant: "error",
+          })
+        }
       })
 
       api.slots?.register?.({

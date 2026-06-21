@@ -257,4 +257,38 @@ describe("modelTokens", () => {
       ),
     ).toBe(600)
   })
+
+  // C4: modelTokens is called directly in the sidebar render, so a corrupt
+  // entry must never push NaN/Infinity into the total reduce or fmtTokens.
+  // The sum is wrapped in safeNum so any non-finite field collapses to 0
+  // instead of poisoning the whole total.
+  it("returns 0 when any token field is NaN (C4 safeNum guard)", () => {
+    expect(modelTokens(makeEntry({ tokensInput: NaN }))).toBe(0)
+    expect(modelTokens(makeEntry({ tokensOutput: NaN }))).toBe(0)
+    expect(modelTokens(makeEntry({ tokensReasoning: NaN }))).toBe(0)
+    expect(modelTokens(makeEntry({ tokensCacheRead: NaN }))).toBe(0)
+    expect(modelTokens(makeEntry({ tokensCacheWrite: NaN }))).toBe(0)
+  })
+
+  it("returns 0 when any token field is Infinity (C4 safeNum guard)", () => {
+    expect(modelTokens(makeEntry({ tokensInput: Infinity }))).toBe(0)
+    expect(modelTokens(makeEntry({ tokensOutput: -Infinity }))).toBe(0)
+  })
+
+  it("zeroes the whole total when any field is NaN (C4 whole-sum wrap)", () => {
+    // The C4 fix wraps the entire sum in safeNum (the simplest guard), so a
+    // single NaN field makes the sum NaN and the total collapses to 0 rather
+    // than propagating NaN into the render. In practice state never holds NaN
+    // (upsertModel sanitizes, loadSession validates), so this is a
+    // defense-in-depth render guard — "0" is the safe fallback, not "NaN".
+    expect(
+      modelTokens(
+        makeEntry({
+          tokensInput: 100,
+          tokensOutput: NaN,
+          tokensReasoning: 300,
+        }),
+      ),
+    ).toBe(0)
+  })
 })

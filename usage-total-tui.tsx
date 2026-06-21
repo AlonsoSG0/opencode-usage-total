@@ -244,7 +244,6 @@ const tui: TuiPlugin = async (api) => {
             tokensCacheWrite: safeNum(
               existing.tokensCacheWrite + safeCacheWrite,
             ),
-            messageCount: existing.messageCount + 1,
           }
         } else {
           sessionModels.push({
@@ -255,7 +254,6 @@ const tui: TuiPlugin = async (api) => {
             tokensReasoning: safeReasoning,
             tokensCacheRead: safeCacheRead,
             tokensCacheWrite: safeCacheWrite,
-            messageCount: 1,
           })
         }
 

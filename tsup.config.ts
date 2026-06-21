@@ -5,7 +5,10 @@ export default defineConfig({
   format: ["esm"],
   outDir: "dist",
   clean: true,
-  dts: false,
+  // S6: emit TypeScript declaration files (.d.ts) so downstream consumers
+  // can type-check against this plugin. Without this, the published package
+  // ships JS only and consumers lose all type information.
+  dts: true,
   external: [
     "@opencode-ai/plugin",
     "@opentui/core",

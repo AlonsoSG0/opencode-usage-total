@@ -21,7 +21,6 @@ function makeEntry(overrides: Partial<ModelEntry> = {}): ModelEntry {
     tokensReasoning: 0,
     tokensCacheRead: 0,
     tokensCacheWrite: 0,
-    messageCount: 0,
     ...overrides,
   }
 }
@@ -129,13 +128,23 @@ describe("fmtTokens", () => {
     expect(fmtTokens(1000)).toBe("1.0k")
   })
 
-  // S2 (audit): 999999 renders as "1000.0k" because the k band divides by
-  // 1000 and formats one decimal, so a value just below 1M rounds up to a
-  // 4-digit "1000.0k" display instead of staying in a cleaner band. This is
-  // a known boundary-band issue; tested here as current behavior, NOT as a
-  // fix.
-  it("formats 999999 as '1000.0k' (known S2 boundary behavior)", () => {
-    expect(fmtTokens(999999)).toBe("1000.0k")
+  // S2 (audit fix): 999999 previously rendered as "1000.0k" because the k
+  // band divides by 1000 and formats one decimal, so a value just below 1M
+  // rounded up to a 4-digit "1000.0k" display. The band now bumps to M once
+  // the formatted k-value would read "1000.0" (r >= 999950).
+  it("formats 999999 as '1.0M' (S2 boundary fix)", () => {
+    expect(fmtTokens(999999)).toBe("1.0M")
+  })
+
+  // S2: exact lower boundary — the first value that would have rendered as
+  // "1000.0k" under the old logic now bumps to "1.0M".
+  it("formats 999950 as '1.0M' (S2 boundary lower edge)", () => {
+    expect(fmtTokens(999950)).toBe("1.0M")
+  })
+
+  // S2: just below the boundary stays in the k band with a clean display.
+  it("formats 999949 as '999.9k' (S2 just below boundary)", () => {
+    expect(fmtTokens(999949)).toBe("999.9k")
   })
 
   it("formats millions with an 'M' suffix and one decimal", () => {

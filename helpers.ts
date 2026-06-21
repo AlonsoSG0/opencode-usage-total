@@ -15,7 +15,6 @@ export interface ModelEntry {
   tokensReasoning: number
   tokensCacheRead: number
   tokensCacheWrite: number
-  messageCount: number
 }
 
 export type ModelEntryKey = Omit<
@@ -26,7 +25,6 @@ export type ModelEntryKey = Omit<
   | "tokensReasoning"
   | "tokensCacheRead"
   | "tokensCacheWrite"
-  | "messageCount"
 >
 
 export function safeNum(value: unknown): number {
@@ -45,11 +43,19 @@ export function fmtTokens(n: number): string {
   // W6: safety clamp — a token tracker should never display negatives.
   // A bad upstream value (drift, double-count, corrupt KV) would otherwise
   // render a "-500" UI glitch and bypass the k/M bands entirely. Clamp to 0.
-  if (n < 0) return "0"
-  if (!Number.isFinite(n) || n === 0) return "0"
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-  return String(Math.round(n))
+  if (!Number.isFinite(n) || n < 0) return "0"
+  const r = Math.round(n)
+  if (r < 1_000) return String(r)
+  // S2: align the display band with the formatting threshold. Without this
+  // guard, values in [999950, 999999] render as "1000.0k" because (r/1000)
+  // formatted to one decimal rounds up to a 4-digit "1000.0" while the M
+  // band's logic threshold is still 1_000_000. Bump to the M band once the
+  // formatted k-value would read "1000.0" — i.e. r >= 999950, detected via
+  // Math.round(r / 100) >= 10_000.
+  if (r >= 1_000_000 || Math.round(r / 100) >= 10_000) {
+    return `${(r / 1_000_000).toFixed(1)}M`
+  }
+  return `${(r / 1_000).toFixed(1)}k`
 }
 
 export function fmtCost(n: number): string {

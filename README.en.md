@@ -19,6 +19,13 @@ Track model usage, tokens, and costs per agent in the OpenCode TUI sidebar.
 opencode plugin -g opencode-usage-total
 ```
 
+## Update
+
+```bash
+rm -rf ~/.cache/opencode/packages/opencode-usage-total@latest
+opencode plugin -g opencode-usage-total
+```
+
 ## Usage
 
 Open a session in OpenCode. The sidebar shows a collapsible **🧠 Models** section with every model used in the current session.

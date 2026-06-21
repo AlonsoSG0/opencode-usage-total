@@ -19,6 +19,13 @@ Realiza el seguimiento de modelos, tokens y costos por agente en la barra latera
 opencode plugin -g opencode-usage-total
 ```
 
+## Actualización
+
+```bash
+rm -rf ~/.cache/opencode/packages/opencode-usage-total@latest
+opencode plugin -g opencode-usage-total
+```
+
 ## Uso
 
 Abre una sesión en OpenCode. La barra lateral muestra una sección colapsable **🧠 Models** con cada modelo usado en la sesión actual.

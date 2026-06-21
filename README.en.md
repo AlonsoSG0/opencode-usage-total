@@ -16,15 +16,7 @@ Track model usage, tokens, and costs per agent in the OpenCode TUI sidebar.
 ## Install
 
 ```bash
-opencode plugin install opencode-usage-total
-```
-
-Or add it manually to `tui.json`:
-
-```json
-{
-  "plugin": ["opencode-usage-total"]
-}
+opencode plugin -g opencode-usage-total
 ```
 
 ## Usage

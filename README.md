@@ -16,15 +16,7 @@ Realiza el seguimiento de modelos, tokens y costos por agente en la barra latera
 ## Instalación
 
 ```bash
-opencode plugin install opencode-usage-total
-```
-
-O agrégalo manualmente en `tui.json`:
-
-```json
-{
-  "plugin": ["opencode-usage-total"]
-}
+opencode plugin -g opencode-usage-total
 ```
 
 ## Uso

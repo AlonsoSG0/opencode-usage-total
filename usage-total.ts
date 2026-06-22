@@ -1,8 +1,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 
 export const UsageTotalPlugin: Plugin = async ({ client }) => {
-  // W8: the initial load log is awaited so it doesn't become an unhandled
-  // rejection, but a log failure must never block plugin load — swallow it.
+  // Await the initial log so rejects are handled; swallow failure so it never blocks plugin load.
   try {
     await client.app.log({
       body: {
@@ -12,15 +11,13 @@ export const UsageTotalPlugin: Plugin = async ({ client }) => {
       },
     })
   } catch {
-    /* best-effort: log failure should not block plugin load */
   }
 
   return {
     event: async ({ event }) => {
       if (event.type === "session.created") {
-        // W8: high-frequency lifecycle events use "debug" so they don't
-        // spam info-level logs; the promise is handled to avoid unhandled
-        // rejections instead of being dropped with `void`.
+        // High-frequency lifecycle events use debug level to avoid spamming info logs.
+        // The promise is handled (not dropped with void) to avoid unhandled rejections.
         client.app
           .log({
             body: {
@@ -34,9 +31,6 @@ export const UsageTotalPlugin: Plugin = async ({ client }) => {
 
       if (event.type === "message.updated") {
         const msg = event.properties.info
-        // W8: message.updated fires dozens of times per response, so
-        // "debug" keeps info-level logs readable; the promise is handled
-        // to avoid unhandled rejections instead of being dropped with `void`.
         client.app
           .log({
             body: {

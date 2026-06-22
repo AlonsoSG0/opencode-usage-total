@@ -107,9 +107,7 @@ describe("fmtTokens", () => {
     expect(fmtTokens(Infinity)).toBe("0")
   })
 
-  // W6: negatives are clamped to "0" — a token tracker should never
-  // display negative usage. This is a safety guard against corrupt
-  // upstream values, not a formatting preference.
+  // Safety guard: a token tracker should never display negative usage.
   it("clamps negative numbers to '0'", () => {
     expect(fmtTokens(-500)).toBe("0")
     expect(fmtTokens(-1000)).toBe("0")
@@ -128,22 +126,17 @@ describe("fmtTokens", () => {
     expect(fmtTokens(1000)).toBe("1.0k")
   })
 
-  // S2 (audit fix): 999999 previously rendered as "1000.0k" because the k
-  // band divides by 1000 and formats one decimal, so a value just below 1M
-  // rounded up to a 4-digit "1000.0k" display. The band now bumps to M once
+  // Boundary fix: 999999 previously rendered "1000.0k". Now bumps to M once
   // the formatted k-value would read "1000.0" (r >= 999950).
-  it("formats 999999 as '1.0M' (S2 boundary fix)", () => {
+  it("formats 999999 as '1.0M' (boundary fix)", () => {
     expect(fmtTokens(999999)).toBe("1.0M")
   })
 
-  // S2: exact lower boundary — the first value that would have rendered as
-  // "1000.0k" under the old logic now bumps to "1.0M".
-  it("formats 999950 as '1.0M' (S2 boundary lower edge)", () => {
+  it("formats 999950 as '1.0M' (boundary lower edge)", () => {
     expect(fmtTokens(999950)).toBe("1.0M")
   })
 
-  // S2: just below the boundary stays in the k band with a clean display.
-  it("formats 999949 as '999.9k' (S2 just below boundary)", () => {
+  it("formats 999949 as '999.9k' (just below boundary)", () => {
     expect(fmtTokens(999949)).toBe("999.9k")
   })
 
@@ -166,9 +159,7 @@ describe("fmtCost", () => {
     expect(fmtCost(Infinity)).toBe("")
   })
 
-  // W6: negatives are clamped to an empty string — a cost tracker
-  // should never display negative costs. This is a safety guard against
-  // corrupt upstream values.
+  // Clamp negatives: a cost tracker should never display negative costs.
   it("clamps negative costs to an empty string", () => {
     expect(fmtCost(-0.5)).toBe("")
     expect(fmtCost(-10)).toBe("")
@@ -195,7 +186,8 @@ describe("modelTokens", () => {
     expect(modelTokens(makeEntry({ tokensInput: 500 }))).toBe(500)
   })
 
-  it("sums input, output, reasoning, and cache tokens", () => {
+  // Cache tokens are excluded from the total — they're a subset of input tokens, not additional tokens.
+  it("sums input, output, and reasoning tokens (cache excluded)", () => {
     expect(
       modelTokens(
         makeEntry({
@@ -206,7 +198,7 @@ describe("modelTokens", () => {
           tokensCacheWrite: 500,
         }),
       ),
-    ).toBe(1500)
+    ).toBe(600)
   })
 
   it("sums large numbers without overflow in the JS number range", () => {
@@ -220,20 +212,19 @@ describe("modelTokens", () => {
           tokensCacheWrite: 4_000_000_000,
         }),
       ),
-    ).toBe(20_000_000_000)
+    ).toBe(11_000_000_000)
   })
 
-  // W5: cache tokens must be part of the total. In long-context sessions
-  // cache reads can dominate, so omitting them made the sidebar under-report.
-  it("includes cacheRead tokens when only cacheRead is set", () => {
-    expect(modelTokens(makeEntry({ tokensCacheRead: 750 }))).toBe(750)
+  // Cache tokens are a subset of input tokens, not additional — they must not inflate the total.
+  it("excludes cacheRead tokens when only cacheRead is set", () => {
+    expect(modelTokens(makeEntry({ tokensCacheRead: 750 }))).toBe(0)
   })
 
-  it("includes cacheWrite tokens when only cacheWrite is set", () => {
-    expect(modelTokens(makeEntry({ tokensCacheWrite: 250 }))).toBe(250)
+  it("excludes cacheWrite tokens when only cacheWrite is set", () => {
+    expect(modelTokens(makeEntry({ tokensCacheWrite: 250 }))).toBe(0)
   })
 
-  it("sums cacheRead and cacheWrite together", () => {
+  it("excludes cacheRead and cacheWrite combined", () => {
     expect(
       modelTokens(
         makeEntry({
@@ -241,7 +232,7 @@ describe("modelTokens", () => {
           tokensCacheWrite: 250,
         }),
       ),
-    ).toBe(1000)
+    ).toBe(0)
   })
 
   it("does not alter the sum when cache tokens are all zero", () => {
@@ -258,11 +249,9 @@ describe("modelTokens", () => {
     ).toBe(600)
   })
 
-  // C4: modelTokens is called directly in the sidebar render, so a corrupt
-  // entry must never push NaN/Infinity into the total reduce or fmtTokens.
-  // The sum is wrapped in safeNum so any non-finite field collapses to 0
-  // instead of poisoning the whole total.
-  it("returns 0 when any token field is NaN (C4 safeNum guard)", () => {
+  // A corrupt entry must never push NaN/Infinity into the render — safeNum collapses
+  // non-finite sums to 0 instead of poisoning the total.
+  it("returns 0 when any token field is NaN (safeNum guard)", () => {
     expect(modelTokens(makeEntry({ tokensInput: NaN }))).toBe(0)
     expect(modelTokens(makeEntry({ tokensOutput: NaN }))).toBe(0)
     expect(modelTokens(makeEntry({ tokensReasoning: NaN }))).toBe(0)
@@ -270,17 +259,15 @@ describe("modelTokens", () => {
     expect(modelTokens(makeEntry({ tokensCacheWrite: NaN }))).toBe(0)
   })
 
-  it("returns 0 when any token field is Infinity (C4 safeNum guard)", () => {
+  it("returns 0 when any token field is Infinity (safeNum guard)", () => {
     expect(modelTokens(makeEntry({ tokensInput: Infinity }))).toBe(0)
     expect(modelTokens(makeEntry({ tokensOutput: -Infinity }))).toBe(0)
   })
 
-  it("zeroes the whole total when any field is NaN (C4 whole-sum wrap)", () => {
-    // The C4 fix wraps the entire sum in safeNum (the simplest guard), so a
-    // single NaN field makes the sum NaN and the total collapses to 0 rather
-    // than propagating NaN into the render. In practice state never holds NaN
-    // (upsertModel sanitizes, loadSession validates), so this is a
-    // defense-in-depth render guard — "0" is the safe fallback, not "NaN".
+  it("zeroes the whole total when any field is NaN (whole-sum wrap)", () => {
+    // A single NaN field makes the sum NaN and safeNum collapses it to 0.
+    // Defense-in-depth: in practice upsertModel sanitizes and loadSession validates,
+    // but a render guard is still safer than propagating NaN into fmtTokens.
     expect(
       modelTokens(
         makeEntry({

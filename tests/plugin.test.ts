@@ -2,17 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { MockInstance } from "vitest"
 import type { TuiPluginApi, TuiPluginMeta } from "@opencode-ai/plugin/tui"
 
-// The plugin's JSX is transformed by oxc into imports of the @opentui/solid
-// automatic runtime, which in turn pulls in the full @opentui/solid renderer
-// (and its terminal/DOM dependencies — "No renderer found" without one). The
-// integration tests below exercise lifecycle, event handling, and state —
-// never the rendered JSX — so stub the runtime to return null.
-//
-// oxc runs in development mode under vitest (`development: !isProduction`),
-// which routes JSX through `jsx-dev-runtime` (re-exporting `jsxDEV`); the
-// production `jsx-runtime` (`jsx`/`jsxs`) is mocked too so the stub holds
-// regardless of build mode. This keeps the renderer out of node and lets
-// `sidebar_content` run its side effects (loadSession) without crashing.
+// The plugin's JSX is transformed by oxc into @opentui/solid imports, which pull in a
+// terminal renderer that doesn't work in vitest. Stub both runtime variants so sidebar_content
+// can run its side effects (loadSession) without crashing. No rendered JSX is tested.
 vi.mock("@opentui/solid/jsx-dev-runtime", () => ({
   jsxDEV: () => null,
   Fragment: () => null,
@@ -29,7 +21,6 @@ import type { ModelEntry } from "../helpers"
 
 const { tui } = tuiModule
 
-// `tui` ignores options/meta, but its typed signature requires all three args.
 const OPTIONS = undefined
 const META = {} as unknown as TuiPluginMeta
 
@@ -78,12 +69,9 @@ function sessionEvent(
   }
 }
 
-// ---- Module-level cleanup tracking ----
-// `initialized` and `lastToastTime` live at module scope in the plugin, so we
-// must tear down after every test or the init guard locks out the next one.
-// `activeCleanup` is updated by the onDispose mock whenever the plugin
-// registers; `activeAbort` covers the W3 path where disposal rides on the
-// AbortSignal instead of onDispose.
+// Module-level state tracking. initialized and lastToastTime live at module scope,
+// so we must tear down after each test or the init guard locks out the next one.
+// activeCleanup covers the onDispose path; activeAbort covers the AbortSignal path.
 let activeCleanup: (() => void) | undefined
 let activeAbort: AbortController | undefined
 
@@ -202,9 +190,7 @@ const CTX = { theme: { current: { text: "#fff", textMuted: "#888" } } }
 
 // ---- Global timer/cleanup setup ----
 beforeEach(() => {
-  // Fake only the timer APIs + Date the plugin uses, leaving Promise
-  // microtasks real so `await init()` resolves normally. Pin the clock so
-  // the toast cooldown (Date.now() - lastToastTime > 2000) is deterministic.
+  // Fake timer APIs + Date so the toast cooldown (Date.now() - lastToastTime > 2000) is deterministic.
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
   vi.setSystemTime(new Date("2025-01-01T00:00:00Z"))
   activeCleanup = undefined
@@ -212,26 +198,20 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  // Tear down whichever disposal path the plugin used. Calling an
-  // already-run cleanup is idempotent; aborting a controller with no
-  // listener is a no-op — so this is safe for both the onDispose and W3
-  // (AbortSignal) cases and prevents the init guard from leaking across tests.
+  // Tear down whichever disposal path the plugin used. Calling an already-run cleanup
+  // is idempotent; aborting a controller with no listener is a no-op.
   try {
     activeCleanup?.()
-  } catch {
-    /* best-effort teardown */
-  }
+  } catch {}
   try {
     activeAbort?.abort()
-  } catch {
-    /* best-effort teardown */
-  }
+  } catch {}
   vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
 // =====================================================================
-// Init guard (C3)
+// Init guard
 // =====================================================================
 describe("init guard", () => {
   it("initializes on first call and registers all resources", async () => {
@@ -297,7 +277,7 @@ describe("init guard", () => {
 })
 
 // =====================================================================
-// Debounce + flush (W2)
+// Debounce + flush
 // =====================================================================
 describe("debounce + flush", () => {
   it("collapses rapid scheduleSave calls into a single KV write", async () => {
@@ -305,10 +285,8 @@ describe("debounce + flush", () => {
     await init(m)
     const handler = getHandler(m)!
 
-    // Three rapid events for the same session. session.updated carries
-    // ACCUMULATIVE cost/tokens, so upsertModel REPLACES (not adds).
-    // The last event wins. scheduleSave debounce collapses all three
-    // into one KV write.
+    // Three rapid events for the same session — session.updated carries accumulative
+    // totals so upsertModel REPLACES. The last event wins; debounce collapses to one write.
     handler(sessionEvent("s1", { cost: 0.01, tokens: { input: 100, output: 200 } }))
     handler(sessionEvent("s1", { cost: 0.02, tokens: { input: 200, output: 400 } }))
     handler(sessionEvent("s1", { cost: 0.03, tokens: { input: 300, output: 600 } }))
@@ -332,11 +310,10 @@ describe("debounce + flush", () => {
     const handler = getHandler(m)!
 
     handler(sessionEvent("s1"))
-    // Pending save is scheduled but not yet flushed.
+    // Not yet flushed — debounce timer hasn't fired.
     expect(m.kvSet).not.toHaveBeenCalled()
 
-    // Dispose triggers flushPending -> the buffered data reaches KV even
-    // though the debounce timer never fired.
+    // Dispose triggers flushPending — data reaches KV even without timer tick.
     activeCleanup?.()
     expect(modelsSavedFor(m, "s1")).toBeDefined()
     expect(modelsSavedFor(m, "s1")!).toHaveLength(1)
@@ -344,12 +321,11 @@ describe("debounce + flush", () => {
 })
 
 // =====================================================================
-// Parent-chain attribution (W4 walk)
+// Parent-chain attribution (walk)
 // =====================================================================
 describe("parent-chain attribution", () => {
   it("attributes a depth-1 sub-agent to the root session", async () => {
     const m = makeMockApi()
-    // sub's parent is root; root has no parent.
     m.sessionGet.mockImplementation((id) =>
       id === "sub" ? { parentID: "root" } : undefined,
     )
@@ -359,7 +335,7 @@ describe("parent-chain attribution", () => {
     handler(sessionEvent("sub"))
     vi.advanceTimersByTime(500)
 
-    // Tracked on the event session AND walked up to the root.
+    // Tracked on the event session AND walked up to root.
     expect(modelsSavedFor(m, "sub")).toBeDefined()
     expect(modelsSavedFor(m, "root")).toBeDefined()
     expect(modelsSavedFor(m, "root")!).toHaveLength(1)
@@ -392,7 +368,7 @@ describe("parent-chain attribution", () => {
     await init(m)
     const handler = getHandler(m)!
 
-    // parentID === sessionID breaks immediately; no root attribution.
+    // parentID same as sessionID — breaks immediately, no root attribution.
     handler(sessionEvent("self"))
     vi.advanceTimersByTime(500)
 
@@ -487,10 +463,10 @@ describe("session.updated handler", () => {
     expect(m.kvSet).not.toHaveBeenCalled()
   })
 
-  it("catches a throwing handler without killing the subscription (W4)", async () => {
+  it("catches a throwing handler without killing the subscription", async () => {
     const m = makeMockApi()
-    // First session.get throws (simulates a state-layer failure inside the
-    // parent-chain walk). Subsequent calls succeed so a later event works.
+    // First session.get throws (simulates a state-layer failure inside the walk).
+    // Subsequent calls succeed so a later event works.
     m.sessionGet
       .mockImplementationOnce(() => {
         throw new Error("state layer down")
@@ -499,8 +475,7 @@ describe("session.updated handler", () => {
     await init(m)
     const handler = getHandler(m)!
 
-    // This event's walk throws -> caught -> error toast, but the listener
-    // stays alive (no rethrow, no unsubscribe).
+    // This event's walk throws → caught → error toast, but the listener stays alive.
     handler(sessionEvent("s1"))
     expect(
       m.toast.mock.calls.some(
@@ -522,8 +497,6 @@ describe("session.updated handler", () => {
     await init(m)
     const handler = getHandler(m)!
 
-    // session.updated fires multiple times with ACCUMULATIVE cost.
-    // Each event REPLACES the previous — no double-counting.
     handler(sessionEvent("s1", { cost: 0.01, tokens: { input: 100, output: 200 } }))
     handler(sessionEvent("s1", { cost: 0.05, tokens: { input: 200, output: 400 } }))
     vi.advanceTimersByTime(500)
@@ -559,9 +532,6 @@ describe("upsertModel", () => {
     await init(m)
     const handler = getHandler(m)!
 
-    // Two events for the same provider/model/agent.
-    // session.updated fires with ACCUMULATIVE cost (not delta), so the
-    // second event REPLACES the first — no double-counting.
     handler(sessionEvent("s1", { cost: 0.01, tokens: { input: 100, output: 200 } }))
     handler(sessionEvent("s1", { cost: 0.02, tokens: { input: 200, output: 400 } }))
     vi.advanceTimersByTime(500)
@@ -595,7 +565,7 @@ describe("upsertModel", () => {
 })
 
 // =====================================================================
-// loadSession KV validation (B2)
+// loadSession KV validation
 // =====================================================================
 describe("loadSession validation (B2)", () => {
   function validEntry(over: Partial<ModelEntry> = {}): ModelEntry {
@@ -675,8 +645,8 @@ describe("loadSession validation (B2)", () => {
 
   it("rejects an array with a corrupt entry and clears KV", async () => {
     const m = makeMockApi()
-    // First entry fine, second has a non-string provider -> whole array
-    // rejected (B2 validates every entry, not just [0]).
+    // First entry fine, second has a non-string provider → whole array
+    // rejected (every entry is validated, not just the first).
     const saved = [
       validEntry(),
       validEntry({ provider: 123 as unknown as string, model: "bad" }),
@@ -722,9 +692,9 @@ describe("loadSession validation (B2)", () => {
 })
 
 // =====================================================================
-// onDispose fallback via AbortSignal (W3)
+// onDispose fallback via AbortSignal
 // =====================================================================
-describe("onDispose fallback (W3)", () => {
+describe("onDispose fallback via AbortSignal", () => {
   it("resets the init guard via the AbortSignal when onDispose is missing", async () => {
     const first = makeMockApi({ withOnDispose: false })
     await init(first)

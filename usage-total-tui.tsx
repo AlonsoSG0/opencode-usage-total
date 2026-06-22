@@ -358,44 +358,29 @@ const tui: TuiPlugin = async (api) => {
           const info = event?.properties?.info
           if (!info) return
 
-          // Skip already-processed messages to prevent double-counting
-          if (info.id && processedMessages.has(info.id)) return
-          if (info.id) processedMessages.add(info.id)
+          // Only assistant messages carry real cost/token data
+          if (info.role !== "assistant") return
+
+          // Dedup guard that handles events without an id (streaming partials)
+          const msgKey =
+            info.id ??
+            `${info.sessionID}:${info.modelID ?? ""}:${info.cost ?? ""}:${info.tokens?.output ?? ""}`
+          if (processedMessages.has(msgKey)) return
+          processedMessages.add(msgKey)
 
           const eventSessionID = info.sessionID
           if (!eventSessionID) return
 
-          let provider: string
-          let model: string
-          let agent: string
-          let cost = 0
-          let tokens: {
-            input?: number
-            output?: number
-            reasoning?: number
-            cacheRead?: number
-            cacheWrite?: number
-          } = {}
-
-          if (info.role === "user") {
-            const mdl = info.model
-            provider = mdl?.providerID ?? UNKNOWN_ID
-            model = mdl?.modelID ?? UNKNOWN_ID
-            agent = info.agent ?? DEFAULT_AGENT
-          } else if (info.role === "assistant") {
-            provider = info.providerID ?? UNKNOWN_ID
-            model = info.modelID ?? UNKNOWN_ID
-            agent = info.agent ?? info.mode ?? DEFAULT_AGENT
-            cost = safeNum(info.cost)
-            tokens = {
-              input: safeNum(info.tokens?.input),
-              output: safeNum(info.tokens?.output),
-              reasoning: safeNum(info.tokens?.reasoning),
-              cacheRead: safeNum(info.tokens?.cache?.read),
-              cacheWrite: safeNum(info.tokens?.cache?.write),
-            }
-          } else {
-            return
+          const provider = info.providerID ?? UNKNOWN_ID
+          const model = info.modelID ?? UNKNOWN_ID
+          const agent = info.agent ?? info.mode ?? DEFAULT_AGENT
+          const cost = safeNum(info.cost)
+          const tokens = {
+            input: safeNum(info.tokens?.input),
+            output: safeNum(info.tokens?.output),
+            reasoning: safeNum(info.tokens?.reasoning),
+            cacheRead: safeNum(info.tokens?.cache?.read),
+            cacheWrite: safeNum(info.tokens?.cache?.write),
           }
 
           trackModel(eventSessionID, { provider, model, agent }, cost, tokens)

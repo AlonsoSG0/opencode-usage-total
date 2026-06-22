@@ -30,7 +30,7 @@ function resolveRouteSessionID(api: TuiPluginApi): string | undefined {
 // C3: module-level init guard. Without this, a reload that happens
 // without a prior dispose (loader bug, process crash, or a missing
 // onDispose path) stacks a fresh event listener and slot on top of the
-// previous ones. Every `message.updated` then runs N handlers, cost /
+// previous ones. Every `session.updated` then runs N handlers, cost /
 // tokens accumulate N×, and `saveSession` writes the inflated values to
 // KV — corruption that survives restarts because KV persists.
 let initialized = false
@@ -129,10 +129,6 @@ const tui: TuiPlugin = async (api) => {
         api.kv?.get?.<boolean>(EXPANDED_KV_KEY, true) !== false,
       )
 
-      // Dedup: track processed message IDs to prevent double-counting
-      // when message.updated fires multiple times for the same message.
-      const processedMessages = new Set<string>()
-
       // Register keyboard shortcut to toggle section
       const TOGGLE_CMD = "usage-total.toggle-section"
       keymapDispose = api.keymap?.registerLayer
@@ -161,7 +157,7 @@ const tui: TuiPlugin = async (api) => {
         return `usage-total:models:${sessionID}`
       }
 
-      // W2: Debounce KV writes. `message.updated` fires dozens of times
+      // W2: Debounce KV writes. `session.updated` fires dozens of times
       // per assistant response; writing to KV on every event is unbounded
       // I/O on the TUI's shared event loop. Instead, mark sessions dirty
       // and flush them in a single batched write after a short idle gap.
@@ -267,20 +263,16 @@ const tui: TuiPlugin = async (api) => {
 
         if (existingIdx >= 0) {
           const existing = sessionModels[existingIdx]
-          // W2: cost uses roundCost (not just safeNum) because cost is
-          // fractional and accumulates float drift (0.1 + 0.2); tokens are
-          // integers, so safeNum alone is enough to guard NaN/Infinity
-          // without rounding.
+          // session.updated fires with ACCUMULATIVE cost/tokens (each
+          // event has the total so far, not a delta). REPLACE, not add.
           sessionModels[existingIdx] = {
             ...existing,
-            cost: roundCost(existing.cost + safeCost),
-            tokensInput: safeNum(existing.tokensInput + safeInput),
-            tokensOutput: safeNum(existing.tokensOutput + safeOutput),
-            tokensReasoning: safeNum(existing.tokensReasoning + safeReasoning),
-            tokensCacheRead: safeNum(existing.tokensCacheRead + safeCacheRead),
-            tokensCacheWrite: safeNum(
-              existing.tokensCacheWrite + safeCacheWrite,
-            ),
+            cost: roundCost(safeCost),
+            tokensInput: safeInput,
+            tokensOutput: safeOutput,
+            tokensReasoning: safeReasoning,
+            tokensCacheRead: safeCacheRead,
+            tokensCacheWrite: safeCacheWrite,
           }
         } else {
           sessionModels.push({
@@ -349,31 +341,22 @@ const tui: TuiPlugin = async (api) => {
         }
       }
 
-      unsub = api.event?.on?.("message.updated", (event) => {
+      unsub = api.event?.on?.("session.updated", (event) => {
         // W4: error boundary around the handler. A throw here (bad event
         // shape, a state-layer read blowing up, etc.) would otherwise
         // propagate and kill the subscription for the rest of the session.
         // Toast a warning and keep the listener alive rather than rethrowing.
         try {
           const info = event?.properties?.info
-          if (!info) return
+          const eventSessionID = event?.properties?.sessionID
+          if (!info || !eventSessionID) return
 
-          // Only assistant messages carry real cost/token data
-          if (info.role !== "assistant") return
-
-          // Dedup guard that handles events without an id (streaming partials)
-          const msgKey =
-            info.id ??
-            `${info.sessionID}:${info.modelID ?? ""}:${info.cost ?? ""}:${info.tokens?.output ?? ""}`
-          if (processedMessages.has(msgKey)) return
-          processedMessages.add(msgKey)
-
-          const eventSessionID = info.sessionID
-          if (!eventSessionID) return
-
-          const provider = info.providerID ?? UNKNOWN_ID
-          const model = info.modelID ?? UNKNOWN_ID
-          const agent = info.agent ?? info.mode ?? DEFAULT_AGENT
+          // session.updated carries accumulative cost/tokens at the
+          // session level. We REPLACE (not add) because each event has
+          // the total so far.
+          const provider = info.model?.providerID ?? UNKNOWN_ID
+          const model = info.model?.id ?? UNKNOWN_ID
+          const agent = info.agent ?? DEFAULT_AGENT
           const cost = safeNum(info.cost)
           const tokens = {
             input: safeNum(info.tokens?.input),
@@ -386,7 +369,7 @@ const tui: TuiPlugin = async (api) => {
           trackModel(eventSessionID, { provider, model, agent }, cost, tokens)
         } catch {
           api.ui?.toast?.({
-            message: "usage-total: error processing message",
+            message: "usage-total: error processing session update",
             variant: "error",
           })
         }

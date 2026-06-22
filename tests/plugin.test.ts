@@ -34,16 +34,11 @@ const OPTIONS = undefined
 const META = {} as unknown as TuiPluginMeta
 
 // ---- Event shapes (only the fields the handler actually reads) ----
-interface MockMessageInfo {
+interface MockSessionInfo {
   id?: string
-  sessionID?: string
-  role?: string
-  providerID?: string
-  modelID?: string
-  agent?: string
-  mode?: string
   cost?: number
-  model?: { providerID?: string; modelID?: string }
+  agent?: string
+  model?: { id?: string; providerID?: string; variant?: string }
   tokens?: {
     input?: number
     output?: number
@@ -51,26 +46,26 @@ interface MockMessageInfo {
     cache?: { read?: number; write?: number }
   }
 }
-interface MockMessageUpdatedEvent {
+interface MockSessionUpdatedEvent {
   type?: string
-  properties?: { info?: MockMessageInfo }
+  properties?: { sessionID?: string; info?: MockSessionInfo }
 }
 
-function assistantEvent(
+function sessionEvent(
   sessionID: string,
-  overrides: MockMessageInfo = {},
-): MockMessageUpdatedEvent {
+  overrides: MockSessionInfo = {},
+): MockSessionUpdatedEvent {
   return {
-    type: "message.updated",
+    type: "session.updated",
     properties: {
+      sessionID,
       info: {
-        id: "msg-1",
-        sessionID,
-        role: "assistant",
-        providerID: "anthropic",
-        modelID: "claude-3-7-sonnet",
-        agent: "primary",
         cost: 0.01,
+        agent: "primary",
+        model: {
+          providerID: "anthropic",
+          id: "claude-3-7-sonnet",
+        },
         tokens: {
           input: 100,
           output: 200,
@@ -165,11 +160,11 @@ function makeMockApi(opts: { withOnDispose?: boolean } = {}): MockApi {
 // ---- Captured-resource accessors ----
 function getHandler(
   m: MockApi,
-): ((e: MockMessageUpdatedEvent) => void) | undefined {
+): ((e: MockSessionUpdatedEvent) => void) | undefined {
   const calls = m.eventOn.mock.calls
   const last = calls[calls.length - 1]
   if (!last) return undefined
-  return last[1] as (e: MockMessageUpdatedEvent) => void
+  return last[1] as (e: MockSessionUpdatedEvent) => void
 }
 
 type SidebarRender = (
@@ -245,7 +240,7 @@ describe("init guard", () => {
 
     expect(m.slotsRegister).toHaveBeenCalledTimes(1)
     expect(m.eventOn).toHaveBeenCalledTimes(1)
-    expect(m.eventOn.mock.calls[0][0]).toBe("message.updated")
+    expect(m.eventOn.mock.calls[0][0]).toBe("session.updated")
     expect(m.keymapRegisterLayer).toHaveBeenCalledTimes(1)
     expect(m.onDispose).toHaveBeenCalledTimes(1)
     expect(
@@ -310,12 +305,13 @@ describe("debounce + flush", () => {
     await init(m)
     const handler = getHandler(m)!
 
-    // Three rapid events for the same session/model accumulate in state but
-    // each scheduleSave resets the debounce timer, so only one KV write fires.
-    // Distinct message IDs so the dedup guard doesn't skip them.
-    handler(assistantEvent("s1", { id: "msg-a" }))
-    handler(assistantEvent("s1", { id: "msg-b" }))
-    handler(assistantEvent("s1", { id: "msg-c" }))
+    // Three rapid events for the same session. session.updated carries
+    // ACCUMULATIVE cost/tokens, so upsertModel REPLACES (not adds).
+    // The last event wins. scheduleSave debounce collapses all three
+    // into one KV write.
+    handler(sessionEvent("s1", { cost: 0.01, tokens: { input: 100, output: 200 } }))
+    handler(sessionEvent("s1", { cost: 0.02, tokens: { input: 200, output: 400 } }))
+    handler(sessionEvent("s1", { cost: 0.03, tokens: { input: 300, output: 600 } }))
 
     expect(m.kvSet).not.toHaveBeenCalled()
     vi.advanceTimersByTime(500)
@@ -324,7 +320,7 @@ describe("debounce + flush", () => {
     expect(writes).toHaveLength(1)
     const models = writes[0][1] as ModelEntry[]
     expect(models).toHaveLength(1)
-    // cost accumulated 3× and was rounded; tokens accumulated 3×.
+    // Last event replaces — cost and tokens are from the third event.
     expect(models[0].cost).toBe(0.03)
     expect(models[0].tokensInput).toBe(300)
     expect(models[0].tokensOutput).toBe(600)
@@ -335,7 +331,7 @@ describe("debounce + flush", () => {
     await init(m)
     const handler = getHandler(m)!
 
-    handler(assistantEvent("s1"))
+    handler(sessionEvent("s1"))
     // Pending save is scheduled but not yet flushed.
     expect(m.kvSet).not.toHaveBeenCalled()
 
@@ -360,7 +356,7 @@ describe("parent-chain attribution", () => {
     await init(m)
     const handler = getHandler(m)!
 
-    handler(assistantEvent("sub"))
+    handler(sessionEvent("sub"))
     vi.advanceTimersByTime(500)
 
     // Tracked on the event session AND walked up to the root.
@@ -380,7 +376,7 @@ describe("parent-chain attribution", () => {
     await init(m)
     const handler = getHandler(m)!
 
-    handler(assistantEvent("grandchild"))
+    handler(sessionEvent("grandchild"))
     vi.advanceTimersByTime(500)
 
     expect(modelsSavedFor(m, "grandchild")).toBeDefined()
@@ -397,7 +393,7 @@ describe("parent-chain attribution", () => {
     const handler = getHandler(m)!
 
     // parentID === sessionID breaks immediately; no root attribution.
-    handler(assistantEvent("self"))
+    handler(sessionEvent("self"))
     vi.advanceTimersByTime(500)
 
     expect(modelsSavedFor(m, "self")).toBeDefined()
@@ -416,7 +412,7 @@ describe("parent-chain attribution", () => {
     const handler = getHandler(m)!
 
     // a -> b -> a(cycle). Walk stops at b; b != a so it's attributed to b.
-    handler(assistantEvent("a"))
+    handler(sessionEvent("a"))
     vi.advanceTimersByTime(500)
 
     expect(modelsSavedFor(m, "a")).toBeDefined()
@@ -432,7 +428,7 @@ describe("parent-chain attribution", () => {
     await init(m)
     const handler = getHandler(m)!
 
-    handler(assistantEvent("solo"))
+    handler(sessionEvent("solo"))
     vi.advanceTimersByTime(500)
 
     expect(modelsSavedFor(m, "solo")).toBeDefined()
@@ -441,15 +437,15 @@ describe("parent-chain attribution", () => {
 })
 
 // =====================================================================
-// message.updated handler
+// session.updated handler
 // =====================================================================
-describe("message.updated handler", () => {
-  it("tracks a valid assistant event into state", async () => {
+describe("session.updated handler", () => {
+  it("tracks a valid session event into state", async () => {
     const m = makeMockApi()
     await init(m)
     const handler = getHandler(m)!
 
-    handler(assistantEvent("s1"))
+    handler(sessionEvent("s1"))
     vi.advanceTimersByTime(500)
 
     const models = modelsSavedFor(m, "s1")!
@@ -469,7 +465,7 @@ describe("message.updated handler", () => {
     await init(m)
     const handler = getHandler(m)!
 
-    handler({ type: "message.updated", properties: {} })
+    handler({ type: "session.updated", properties: {} })
     vi.advanceTimersByTime(500)
 
     expect(m.kvSet).not.toHaveBeenCalled()
@@ -481,9 +477,9 @@ describe("message.updated handler", () => {
     const handler = getHandler(m)!
 
     handler({
-      type: "message.updated",
+      type: "session.updated",
       properties: {
-        info: { role: "assistant", providerID: "anthropic" },
+        info: { agent: "primary", model: { providerID: "anthropic" } },
       },
     })
     vi.advanceTimersByTime(500)
@@ -505,57 +501,39 @@ describe("message.updated handler", () => {
 
     // This event's walk throws -> caught -> error toast, but the listener
     // stays alive (no rethrow, no unsubscribe).
-    handler(assistantEvent("s1"))
+    handler(sessionEvent("s1"))
     expect(
       m.toast.mock.calls.some(
         (c) =>
-          c[0].message === "usage-total: error processing message" &&
+          c[0].message === "usage-total: error processing session update" &&
           c[0].variant === "error",
       ),
     ).toBe(true)
 
     // A second, healthy event is still processed by the same subscription.
-    // Distinct message ID so the dedup guard doesn't skip it.
-    handler(assistantEvent("s1", { id: "msg-2", modelID: "claude-haiku" }))
+    handler(sessionEvent("s1", { model: { providerID: "anthropic", id: "claude-haiku" } }))
     vi.advanceTimersByTime(500)
 
     expect(modelsSavedFor(m, "s1")).toBeDefined()
   })
 
-  it("skips duplicate message IDs to prevent double-counting", async () => {
+  it("replaces cost on duplicate session events (streaming updates)", async () => {
     const m = makeMockApi()
     await init(m)
     const handler = getHandler(m)!
 
-    // First event processes normally
-    handler(assistantEvent("s1", { id: "dup-1" }))
-    // Same message ID again -> skipped
-    handler(assistantEvent("s1", { id: "dup-1" }))
-    // Different message ID -> processed
-    handler(
-      assistantEvent("s1", { id: "dup-2", cost: 0.02, tokens: { input: 50, output: 100 } }),
-    )
+    // session.updated fires multiple times with ACCUMULATIVE cost.
+    // Each event REPLACES the previous — no double-counting.
+    handler(sessionEvent("s1", { cost: 0.01, tokens: { input: 100, output: 200 } }))
+    handler(sessionEvent("s1", { cost: 0.05, tokens: { input: 200, output: 400 } }))
     vi.advanceTimersByTime(500)
 
     const models = modelsSavedFor(m, "s1")!
     expect(models).toHaveLength(1)
-    // Only first + third events accumulated (second was skipped)
-    expect(models[0].cost).toBe(0.03) // 0.01 + 0.02
-    expect(models[0].tokensInput).toBe(150) // 100 + 50
-    expect(models[0].tokensOutput).toBe(300) // 200 + 100
-  })
-
-  it("processes events without an ID (no dedup guard)", async () => {
-    const m = makeMockApi()
-    await init(m)
-    const handler = getHandler(m)!
-
-    handler(assistantEvent("s1", { id: undefined }))
-    vi.advanceTimersByTime(500)
-
-    const models = modelsSavedFor(m, "s1")!
-    expect(models).toHaveLength(1)
-    expect(models[0].cost).toBe(0.01)
+    // Last event replaces — cost and tokens from the second event.
+    expect(models[0].cost).toBe(0.05)
+    expect(models[0].tokensInput).toBe(200)
+    expect(models[0].tokensOutput).toBe(400)
   })
 })
 
@@ -568,7 +546,7 @@ describe("upsertModel", () => {
     await init(m)
     const handler = getHandler(m)!
 
-    handler(assistantEvent("s1"))
+    handler(sessionEvent("s1"))
     vi.advanceTimersByTime(500)
 
     const models = modelsSavedFor(m, "s1")!
@@ -576,18 +554,21 @@ describe("upsertModel", () => {
     expect(models[0].model).toBe("claude-3-7-sonnet")
   })
 
-  it("accumulates cost and tokens for a duplicate model", async () => {
+  it("replaces cost and tokens for a duplicate model (streaming)", async () => {
     const m = makeMockApi()
     await init(m)
     const handler = getHandler(m)!
 
-    handler(assistantEvent("s1", { id: "msg-1" }))
-    handler(assistantEvent("s1", { id: "msg-2" }))
+    // Two events for the same provider/model/agent.
+    // session.updated fires with ACCUMULATIVE cost (not delta), so the
+    // second event REPLACES the first — no double-counting.
+    handler(sessionEvent("s1", { cost: 0.01, tokens: { input: 100, output: 200 } }))
+    handler(sessionEvent("s1", { cost: 0.02, tokens: { input: 200, output: 400 } }))
     vi.advanceTimersByTime(500)
 
     const models = modelsSavedFor(m, "s1")!
     expect(models).toHaveLength(1)
-    // roundCost(0.01 + 0.01) === 0.02; tokens summed linearly.
+    // Second event replaces first.
     expect(models[0].cost).toBe(0.02)
     expect(models[0].tokensInput).toBe(200)
     expect(models[0].tokensOutput).toBe(400)
@@ -599,7 +580,7 @@ describe("upsertModel", () => {
     const handler = getHandler(m)!
 
     handler(
-      assistantEvent("s1", {
+      sessionEvent("s1", {
         cost: NaN,
         tokens: { input: Infinity, output: 200 },
       }),
@@ -658,7 +639,7 @@ describe("loadSession validation (B2)", () => {
     // The loaded array is actually in state: a new event for the same
     // session (different model) accumulates alongside the loaded entry.
     const handler = getHandler(m)!
-    handler(assistantEvent("s1", { providerID: "anthropic" }))
+    handler(sessionEvent("s1", { model: { providerID: "anthropic", id: "claude-3-7-sonnet" } }))
     vi.advanceTimersByTime(500)
 
     const models = modelsSavedFor(m, "s1")!

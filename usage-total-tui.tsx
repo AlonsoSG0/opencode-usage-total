@@ -359,6 +359,11 @@ const tui: TuiPlugin = async (api) => {
                 <box
                   flexDirection="row"
                   justifyContent="space-between"
+                  on:mouseDown={() => {
+                    const next = !expanded()
+                    setExpanded(next)
+                    api.kv?.set?.(EXPANDED_KV_KEY, next)
+                  }}
                 >
                   <box flexDirection="row">
                     <text fg={ctx.theme.current.text}>

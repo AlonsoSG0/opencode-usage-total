@@ -2,7 +2,7 @@
 
 Realiza el seguimiento de modelos, tokens y costos por agente en la barra lateral de OpenCode.
 
-![version](https://img.shields.io/badge/version-0.1.14-muted)
+![version](https://img.shields.io/badge/version-0.2.0-muted)
 
 ## Características
 

@@ -2,7 +2,7 @@
 
 Track model usage, tokens, and costs per agent in the OpenCode TUI sidebar.
 
-![version](https://img.shields.io/badge/version-0.1.14-muted)
+![version](https://img.shields.io/badge/version-0.2.0-muted)
 
 ## Features
 

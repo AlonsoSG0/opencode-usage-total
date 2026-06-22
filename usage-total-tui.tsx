@@ -33,6 +33,8 @@ let initialized = false
 
 // Rate-limit new-model toasts to one per 2-second window to prevent toast storms from sub-agent fan-out.
 let lastToastTime = 0
+// Rate-limit error toasts the same way — a bad stream shouldn't flood the UI.
+let lastErrorToastTime = 0
 
 const tui: TuiPlugin = async (api) => {
   // Refuse re-initialization while active. The flag resets in cleanup so dispose+reload still works.
@@ -68,8 +70,9 @@ const tui: TuiPlugin = async (api) => {
       solidDispose?.()
     } catch {}
     initialized = false
-    // Reset the toast cooldown so a reload doesn't inherit the previous instance's window.
+        // Reset the toast cooldowns so a reload doesn't inherit the previous instance's window.
     lastToastTime = 0
+    lastErrorToastTime = 0
   }
 
   try {
@@ -311,10 +314,13 @@ const tui: TuiPlugin = async (api) => {
 
           trackModel(eventSessionID, { provider, model, agent }, cost, tokens)
         } catch {
-          api.ui?.toast?.({
-            message: "usage-total: error processing session update",
-            variant: "error",
-          })
+          if (Date.now() - lastErrorToastTime > 2000) {
+            lastErrorToastTime = Date.now()
+            api.ui?.toast?.({
+              message: "usage-total: error processing session update",
+              variant: "error",
+            })
+          }
         }
       })
 

@@ -46,25 +46,45 @@ function sessionEvent(
   sessionID: string,
   overrides: MockSessionInfo = {},
 ): MockSessionUpdatedEvent {
+  const info = {
+    cost: 0.01,
+    agent: "primary",
+    model: {
+      providerID: "anthropic",
+      id: "claude-3-7-sonnet",
+    },
+    tokens: {
+      input: 100,
+      output: 200,
+      reasoning: 0,
+      cache: { read: 0, write: 0 },
+    },
+    ...overrides,
+  }
+  // Reflect the new state into the mock's sessionState so the handler can
+  // re-read cost/tokens from api.state.session.get() like the real plugin does.
+  const mock = (globalThis as Record<string, unknown>).__lastMockApi as
+    | {
+        sessionState?: Map<string, typeof info>
+        sessionMessages?: Map<string, Array<typeof info & { role: string }>>
+      }
+    | undefined
+  if (mock?.sessionState) mock.sessionState.set(sessionID, info)
+  // sessionEvent represents a stream of step-finishes for one assistant turn.
+  // Each event appends a new assistant message whose tokens and cost are
+  // independent — the real plugin uses the LATEST assistant message's tokens
+  // as context size and the SUM of all message costs as total cost, so the
+  // mock needs to keep every message in the array.
+  if (mock?.sessionMessages) {
+    const list = mock.sessionMessages.get(sessionID) ?? []
+    list.push({ ...info, role: "assistant" })
+    mock.sessionMessages.set(sessionID, list)
+  }
   return {
     type: "session.updated",
     properties: {
       sessionID,
-      info: {
-        cost: 0.01,
-        agent: "primary",
-        model: {
-          providerID: "anthropic",
-          id: "claude-3-7-sonnet",
-        },
-        tokens: {
-          input: 100,
-          output: 200,
-          reasoning: 0,
-          cache: { read: 0, write: 0 },
-        },
-        ...overrides,
-      },
+      info,
     },
   }
 }
@@ -90,15 +110,103 @@ interface MockApi {
   keymapRegisterLayer: MockInstance<(config: unknown) => () => void>
   onDispose: MockInstance<(fn: () => void) => () => void> | undefined
   abortController: AbortController
+  sessionState: Map<
+    string,
+    {
+      parentID?: string
+      cost?: number
+      agent?: string
+      model?: { id?: string; providerID?: string; variant?: string }
+      tokens?: {
+        input?: number
+        output?: number
+        reasoning?: number
+        cache?: { read?: number; write?: number }
+      }
+    }
+  >
+  sessionParents: Map<string, string>
+  sessionMessages: Map<
+    string,
+    Array<{
+      role: string
+      cost?: number
+      model?: { id?: string; providerID?: string; variant?: string }
+      tokens?: {
+        input?: number
+        output?: number
+        reasoning?: number
+        cache?: { read?: number; write?: number }
+      }
+    }>
+  >
 }
 
 function makeMockApi(opts: { withOnDispose?: boolean } = {}): MockApi {
   const kvGet = vi.fn<(key: string, fb?: unknown) => unknown>(() => undefined)
   const kvSet = vi.fn<(key: string, value: unknown) => void>()
   const toast = vi.fn<(input: { message: string; variant?: string }) => void>()
+  // sessionState mirrors opencode's TuiState.session: a map sessionID -> Session.
+  // The handler under test reads cost/tokens/model/agent from this state, not
+  // from event payloads, so the mock needs to track it.
+  const sessionState = new Map<
+    string,
+    {
+      parentID?: string
+      cost?: number
+      agent?: string
+      model?: { id?: string; providerID?: string; variant?: string }
+      tokens?: {
+        input?: number
+        output?: number
+        reasoning?: number
+        cache?: { read?: number; write?: number }
+      }
+    }
+  >()
+  // sessionParents is layered on top of sessionState for walk tests: the
+  // sessionEvent helper writes cost/tokens, while walk tests populate
+  // sessionParents with the chain. sessionGet merges both so handlers see
+  // a single coherent state.
+  const sessionParents = new Map<string, string>()
+  // sessionMessages mirrors `api.state.session.messages(id)` in the real TUI.
+  // The handler reads the last assistant message's tokens (context size) and
+  // sums every assistant message's cost (total cost) — see lastAssistantWithTokens
+  // and sumAssistantCost in helpers.ts. sessionEvent appends one entry per call.
+  const sessionMessages = new Map<
+    string,
+    Array<{
+      role: string
+      cost?: number
+      model?: { id?: string; providerID?: string; variant?: string }
+      tokens?: {
+        input?: number
+        output?: number
+        reasoning?: number
+        cache?: { read?: number; write?: number }
+      }
+    }>
+  >()
   const sessionGet = vi.fn<
     (id: string) => { parentID?: string } | undefined
-  >(() => undefined)
+  >((id) => {
+    const fromState = sessionState.get(id)
+    const parentID = sessionParents.get(id)
+    if (!fromState && !parentID) return undefined
+    return { ...(fromState ?? {}), ...(parentID ? { parentID } : {}) }
+  })
+  const sessionMessagesGet = vi.fn<
+    (id: string) => ReadonlyArray<{
+      role: string
+      cost?: number
+      tokens?: {
+        input?: number
+        output?: number
+        reasoning?: number
+        cache?: { read?: number; write?: number }
+      }
+    }>
+  >((id) => sessionMessages.get(id) ?? [])
   const eventOn = vi.fn<
     (type: string, handler: (e: unknown) => void) => () => void
   >(() => () => {})
@@ -120,7 +228,13 @@ function makeMockApi(opts: { withOnDispose?: boolean } = {}): MockApi {
     kv: { get: kvGet, set: kvSet, ready: true },
     ui: { toast },
     lifecycle: { onDispose, signal: abortController.signal },
-    state: { session: { get: sessionGet } },
+    state: {
+      session: {
+        get: sessionGet,
+        messages: sessionMessagesGet,
+        state: sessionState,
+      },
+    },
     event: { on: eventOn },
     slots: { register: slotsRegister },
     keymap: { registerLayer: keymapRegisterLayer },
@@ -130,6 +244,15 @@ function makeMockApi(opts: { withOnDispose?: boolean } = {}): MockApi {
       navigate: vi.fn(),
     },
   } as unknown as TuiPluginApi
+
+  // Expose the session state to module-level helpers like sessionEvent() so
+  // they can mirror the latest info into api.state without the test having
+  // to thread the mock through every call site.
+  ;(globalThis as Record<string, unknown>).__lastMockApi = {
+    sessionState,
+    sessionParents,
+    sessionMessages,
+  }
 
   return {
     api,
@@ -142,6 +265,9 @@ function makeMockApi(opts: { withOnDispose?: boolean } = {}): MockApi {
     keymapRegisterLayer,
     onDispose,
     abortController,
+    sessionState,
+    sessionParents,
+    sessionMessages,
   }
 }
 
@@ -219,8 +345,11 @@ describe("init guard", () => {
     await init(m)
 
     expect(m.slotsRegister).toHaveBeenCalledTimes(1)
-    expect(m.eventOn).toHaveBeenCalledTimes(1)
-    expect(m.eventOn.mock.calls[0][0]).toBe("session.updated")
+    // Three event subscriptions: session.updated, message.updated, session.idle.
+    expect(m.eventOn).toHaveBeenCalledTimes(3)
+    expect(m.eventOn.mock.calls.map((c) => c[0])).toEqual(
+      expect.arrayContaining(["session.updated", "message.updated", "session.idle"]),
+    )
     expect(m.keymapRegisterLayer).toHaveBeenCalledTimes(1)
     expect(m.onDispose).toHaveBeenCalledTimes(1)
     expect(
@@ -267,7 +396,8 @@ describe("init guard", () => {
     await init(second)
 
     expect(second.slotsRegister).toHaveBeenCalledTimes(1)
-    expect(second.eventOn).toHaveBeenCalledTimes(1)
+    // Three event subscriptions: session.updated, message.updated, session.idle.
+    expect(second.eventOn).toHaveBeenCalledTimes(3)
     expect(
       second.toast.mock.calls.some(
         (c) => c[0].message === "usage-total TUI loaded",
@@ -298,10 +428,11 @@ describe("debounce + flush", () => {
     expect(writes).toHaveLength(1)
     const models = writes[0][1] as ModelEntry[]
     expect(models).toHaveLength(1)
-    // Last event replaces — cost and tokens are from the third event.
-    expect(models[0].cost).toBe(0.03)
+    // Tokens from the last message (third event); cost is the SUM of all three
+    // messages' costs because that's how the opencode app reports totalCost.
     expect(models[0].tokensInput).toBe(300)
     expect(models[0].tokensOutput).toBe(600)
+    expect(models[0].cost).toBeCloseTo(0.06, 10)
   })
 
   it("cleanup flushes pending writes before teardown", async () => {
@@ -326,9 +457,7 @@ describe("debounce + flush", () => {
 describe("parent-chain attribution", () => {
   it("attributes a depth-1 sub-agent to the root session", async () => {
     const m = makeMockApi()
-    m.sessionGet.mockImplementation((id) =>
-      id === "sub" ? { parentID: "root" } : undefined,
-    )
+    m.sessionParents.set("sub", "root")
     await init(m)
     const handler = getHandler(m)!
 
@@ -340,15 +469,15 @@ describe("parent-chain attribution", () => {
     expect(modelsSavedFor(m, "root")).toBeDefined()
     expect(modelsSavedFor(m, "root")!).toHaveLength(1)
     expect(modelsSavedFor(m, "root")![0].model).toBe("claude-3-7-sonnet")
+    // Walked entry uses the `sub:` prefix so it never collides with a real
+    // root entry that happens to share provider/model/agent.
+    expect(modelsSavedFor(m, "root")![0].agent).toBe("sub:primary")
   })
 
   it("attributes a depth-2 grandchild to the root session", async () => {
     const m = makeMockApi()
-    m.sessionGet.mockImplementation((id) => {
-      if (id === "grandchild") return { parentID: "child" }
-      if (id === "child") return { parentID: "root" }
-      return undefined
-    })
+    m.sessionParents.set("grandchild", "child")
+    m.sessionParents.set("child", "root")
     await init(m)
     const handler = getHandler(m)!
 
@@ -358,13 +487,51 @@ describe("parent-chain attribution", () => {
     expect(modelsSavedFor(m, "grandchild")).toBeDefined()
     expect(modelsSavedFor(m, "root")).toBeDefined()
     expect(modelsSavedFor(m, "child")).toBeUndefined()
+    expect(modelsSavedFor(m, "root")![0].agent).toBe("sub:primary")
+  })
+
+  it("sub-agent with the same agent name does not overwrite the root entry", async () => {
+    // Without the `sub:` prefix, a sub-agent running as agent "primary" would
+    // dedupeKey-collision with the root's own "primary" entry and the walk
+    // would REPLACE the root's cost/tokens with the sub-agent's. The render
+    // would then sum the sub-agent's cost on top of the root's, double-counting.
+    const m = makeMockApi()
+    m.sessionParents.set("sub", "root")
+    await init(m)
+    const handler = getHandler(m)!
+
+    // Root processes its own LLM call first.
+    handler(
+      sessionEvent("root", {
+        cost: 0.5,
+        tokens: { input: 1000, output: 2000 },
+        agent: "primary",
+      }),
+    )
+    // Then a sub-agent runs with the same agent name "primary".
+    handler(
+      sessionEvent("sub", {
+        cost: 0.3,
+        tokens: { input: 500, output: 1000 },
+        agent: "primary",
+      }),
+    )
+    vi.advanceTimersByTime(500)
+
+    const root = modelsSavedFor(m, "root")!
+    // Both entries coexist: root's "primary" stays intact, sub-agent's "primary"
+    // is parked under the `sub:primary` key.
+    expect(root).toHaveLength(2)
+    const byAgent = Object.fromEntries(root.map((m) => [m.agent, m]))
+    expect(byAgent["primary"].cost).toBe(0.5)
+    expect(byAgent["primary"].tokensInput).toBe(1000)
+    expect(byAgent["sub:primary"].cost).toBe(0.3)
+    expect(byAgent["sub:primary"].tokensInput).toBe(500)
   })
 
   it("self-referencing parentID does not loop", async () => {
     const m = makeMockApi()
-    m.sessionGet.mockImplementation((id) =>
-      id === "self" ? { parentID: "self" } : undefined,
-    )
+    m.sessionParents.set("self", "self")
     await init(m)
     const handler = getHandler(m)!
 
@@ -379,11 +546,8 @@ describe("parent-chain attribution", () => {
 
   it("cyclic parent chain terminates via the visited set", async () => {
     const m = makeMockApi()
-    m.sessionGet.mockImplementation((id) => {
-      if (id === "a") return { parentID: "b" }
-      if (id === "b") return { parentID: "a" }
-      return undefined
-    })
+    m.sessionParents.set("a", "b")
+    m.sessionParents.set("b", "a")
     await init(m)
     const handler = getHandler(m)!
 
@@ -466,16 +630,14 @@ describe("session.updated handler", () => {
   it("catches a throwing handler without killing the subscription", async () => {
     const m = makeMockApi()
     // First session.get throws (simulates a state-layer failure inside the walk).
-    // Subsequent calls succeed so a later event works.
-    m.sessionGet
-      .mockImplementationOnce(() => {
-        throw new Error("state layer down")
-      })
-      .mockImplementation(() => undefined)
+    // Subsequent calls use the default (read from sessionState) so a later event works.
+    m.sessionGet.mockImplementationOnce(() => {
+      throw new Error("state layer down")
+    })
     await init(m)
     const handler = getHandler(m)!
 
-    // This event's walk throws → caught → error toast, but the listener stays alive.
+    // This event's first read throws → caught → error toast, but the listener stays alive.
     handler(sessionEvent("s1"))
     expect(
       m.toast.mock.calls.some(
@@ -503,10 +665,10 @@ describe("session.updated handler", () => {
 
     const models = modelsSavedFor(m, "s1")!
     expect(models).toHaveLength(1)
-    // Last event replaces — cost and tokens from the second event.
-    expect(models[0].cost).toBe(0.05)
+    // Tokens from the last message; cost is the sum across messages.
     expect(models[0].tokensInput).toBe(200)
     expect(models[0].tokensOutput).toBe(400)
+    expect(models[0].cost).toBeCloseTo(0.06, 10)
   })
 })
 
@@ -527,7 +689,10 @@ describe("upsertModel", () => {
     expect(models[0].model).toBe("claude-3-7-sonnet")
   })
 
-  it("replaces cost and tokens for a duplicate model (streaming)", async () => {
+  it("replaces tokens but accumulates cost across messages (matches opencode app)", async () => {
+    // The plugin mirrors the official opencode app: tokens come from the
+    // LAST assistant message (context size of the most recent turn), and
+    // cost is the SUM of every assistant message's cost (total cost).
     const m = makeMockApi()
     await init(m)
     const handler = getHandler(m)!
@@ -538,10 +703,11 @@ describe("upsertModel", () => {
 
     const models = modelsSavedFor(m, "s1")!
     expect(models).toHaveLength(1)
-    // Second event replaces first.
-    expect(models[0].cost).toBe(0.02)
+    // Tokens are from the last message (context size).
     expect(models[0].tokensInput).toBe(200)
     expect(models[0].tokensOutput).toBe(400)
+    // Cost is the sum of every assistant message.
+    expect(models[0].cost).toBeCloseTo(0.03, 10)
   })
 
   it("sanitizes NaN/Infinity cost and tokens to 0", async () => {

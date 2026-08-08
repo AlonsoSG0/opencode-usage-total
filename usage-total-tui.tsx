@@ -3,13 +3,17 @@ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { createRoot, createSignal } from "solid-js"
 import { version } from "./package.json"
 import {
+  type MessageLike,
   type ModelEntry,
   type ModelEntryKey,
   fmtCost,
   fmtTokens,
+  lastAssistantWithTokens,
   modelTokens,
   roundCost,
   safeNum,
+  sumAssistantCost,
+  tokenTotal,
 } from "./helpers"
 
 // ---- Constants ----
@@ -273,7 +277,11 @@ const tui: TuiPlugin = async (api) => {
         }
 
         // Walk parent chain to root so sub-agent models appear in the main sidebar,
-        // not just the immediate parent. Previous depth-1 logic left grandchildren invisible.
+        // not just the immediate parent. Prefix the agent with `sub:` so the root
+        // entry stays distinct from sub-agent entries — without this, an upsert from
+        // a sub-agent would REPLACE the root's own entry (same provider/model/agent
+        // when sub-agent inherits root's agent) and the render would double-count
+        // the sub-agent's cost in `totalCost`.
         let cursor = eventSessionID
         const visited = new Set<string>()
         while (true) {
@@ -288,31 +296,64 @@ const tui: TuiPlugin = async (api) => {
           cursor = sess.parentID
         }
         if (cursor !== eventSessionID) {
-          upsertModel(cursor, entry, cost, tokens)
+          upsertModel(
+            cursor,
+            { ...entry, agent: `sub:${entry.agent}` },
+            cost,
+            tokens,
+          )
         }
       }
 
-      unsub = api.event?.on?.("session.updated", (event) => {
-        // Error boundary: catch and toast instead of rethrowing, so a single bad
-        // event doesn't kill the subscription for the rest of the session.
+      // Refresh by reading the last assistant message with token usage from
+      // `api.state.session.messages(sessionID)`, matching the official opencode
+      // app's `lastAssistantWithTokens` selector. This is the only metric that
+      // stays in sync with what opencode shows in its own UI:
+      //
+      // - `session.tokens` (sum across all step-finishes) is what the projector
+      //   keeps in the DB, but `api.state.session.get(id).tokens` lags behind
+      //   because opencode only re-publishes `session.updated` on user-driven
+      //   actions, not after every step. So the in-memory state can show
+      //   values that are minutes old for an active session.
+      // - `lastAssistant.tokens` is read from the messages array, which IS
+      //   updated incrementally on every `message.updated` event, and it's
+      //   exactly what the official app's `session-context-metrics.ts`
+      //   surfaces as the "context size".
+      function refreshFromState(sessionID: string) {
+        const sess = api.state?.session?.get?.(sessionID)
+        if (!sess) return
+        const messages: ReadonlyArray<MessageLike> = api.state?.session?.messages?.(sessionID) ?? []
+        const last = lastAssistantWithTokens(messages)
+
+        const provider = sess.model?.providerID ?? UNKNOWN_ID
+        const model = sess.model?.id ?? UNKNOWN_ID
+        const agent = sess.agent ?? DEFAULT_AGENT
+        // Cost is the sum of every assistant message's accumulated cost.
+        // lastAssistant.tokens is the context size for the most recent turn.
+        const cost = sumAssistantCost(messages)
+        const tokens = last
+          ? {
+              input: safeNum(last.tokens?.input),
+              output: safeNum(last.tokens?.output),
+              reasoning: safeNum(last.tokens?.reasoning),
+              cacheRead: safeNum(last.tokens?.cache?.read),
+              cacheWrite: safeNum(last.tokens?.cache?.write),
+            }
+          : {
+              input: 0,
+              output: 0,
+              reasoning: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+            }
+
+        trackModel(sessionID, { provider, model, agent }, cost, tokens)
+      }
+
+      const handleRefresh = (sessionID: string | undefined) => {
+        if (!sessionID) return
         try {
-          const info = event?.properties?.info
-          const eventSessionID = event?.properties?.sessionID
-          if (!info || !eventSessionID) return
-
-          const provider = info.model?.providerID ?? UNKNOWN_ID
-          const model = info.model?.id ?? UNKNOWN_ID
-          const agent = info.agent ?? DEFAULT_AGENT
-          const cost = safeNum(info.cost)
-          const tokens = {
-            input: safeNum(info.tokens?.input),
-            output: safeNum(info.tokens?.output),
-            reasoning: safeNum(info.tokens?.reasoning),
-            cacheRead: safeNum(info.tokens?.cache?.read),
-            cacheWrite: safeNum(info.tokens?.cache?.write),
-          }
-
-          trackModel(eventSessionID, { provider, model, agent }, cost, tokens)
+          refreshFromState(sessionID)
         } catch {
           if (Date.now() - lastErrorToastTime > 2000) {
             lastErrorToastTime = Date.now()
@@ -322,7 +363,31 @@ const tui: TuiPlugin = async (api) => {
             })
           }
         }
+      }
+
+      // session.updated — fires on user actions (setTitle, archive, metadata, etc.).
+      const unsubSession = api.event?.on?.("session.updated", (event) => {
+        handleRefresh(event?.properties?.sessionID)
       })
+
+      // message.updated — fires after every step-finish (and tool call result).
+      // The DB has already been updated by the projector via delta accumulation;
+      // re-reading from state captures the new totals in real time.
+      const unsubMessage = api.event?.on?.("message.updated", (event) => {
+        handleRefresh(event?.properties?.sessionID)
+      })
+
+      // session.idle — fires when the session settles after a turn. Final
+      // safety net for any step that didn't trigger a message.updated.
+      const unsubIdle = api.event?.on?.("session.idle", (event) => {
+        handleRefresh(event?.properties?.sessionID)
+      })
+
+      unsub = () => {
+        unsubSession?.()
+        unsubMessage?.()
+        unsubIdle?.()
+      }
 
       api.slots?.register?.({
         order: 200,
@@ -337,7 +402,7 @@ const tui: TuiPlugin = async (api) => {
               return (
                 <box flexDirection="column">
                   <text fg={ctx.theme.current.text}>
-                    🧠 Models
+                    🧠 Modelss
                   </text>
                   <text fg={ctx.theme.current.textMuted}>
                     {sessionID
@@ -348,11 +413,21 @@ const tui: TuiPlugin = async (api) => {
               )
             }
 
-            const totalCost = models.reduce((sum, m) => sum + m.cost, 0)
-            const totalTokens = models.reduce(
-              (sum, m) => sum + modelTokens(m),
-              0,
-            )
+            // Total cost is summed only across root entries (no `sub:` prefix).
+            // Sub-agent entries are surfaced for visibility but excluded from the
+            // root's total — they live in their own session, where the user sees
+            // them directly. Without this filter, a sub-agent's cost would be
+            // double-counted (once in its own session, once in the root).
+            const totalCost = models
+              .filter((m) => !m.agent.startsWith("sub:"))
+              .reduce((sum, m) => sum + m.cost, 0)
+            // Context size comes from the API directly — use the first non-sub-agent
+            // model's tokens, don't sum across models (context size isn't additive
+            // the way cost is).
+            const totalTokens = (() => {
+              const rootModel = models.find((m) => !m.agent.startsWith("sub:"))
+              return rootModel ? modelTokens(rootModel) : 0
+            })()
 
             return (
               <box flexDirection="column">
@@ -367,14 +442,12 @@ const tui: TuiPlugin = async (api) => {
                 >
                   <box flexDirection="row">
                     <text fg={ctx.theme.current.text}>
-                      {expanded() ? "▼" : "▶"} 🧠 Models
+                      {expanded() ? "▼" : "▶"} 🧠 Modelss
                     </text>
                     <text fg={ctx.theme.current.textMuted}> {version}</text>
                   </box>
                   <text fg={ctx.theme.current.text}>
-                    {totalCost > 0
-                      ? `${fmtCost(totalCost)} · ${fmtTokens(totalTokens)}`
-                      : fmtTokens(totalTokens)}
+                    {totalCost > 0 ? fmtCost(totalCost) : ""}
                   </text>
                 </box>
                 {expanded() &&
@@ -388,11 +461,12 @@ const tui: TuiPlugin = async (api) => {
                         {"  " + m.model}
                       </text>
                       <text fg={ctx.theme.current.textMuted}>
-                        {m.cost > 0
-                          ? `${fmtCost(m.cost)}${modelTokens(m) > 0 ? ` · ${fmtTokens(modelTokens(m))}` : ""}`
-                          : modelTokens(m) > 0
-                            ? fmtTokens(modelTokens(m))
-                            : "-"}
+                        {/* Token display is intentionally hidden until the
+                            accounting is accurate — see README disclaimer. The
+                            variables and helpers (totalTokens, modelTokens)
+                            remain in place so we can re-enable the UI when
+                            the bug is fixed without rewriting the render. */}
+                        {m.cost > 0 ? fmtCost(m.cost) : "-"}
                       </text>
                     </box>
                   </box>

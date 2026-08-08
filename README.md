@@ -7,11 +7,13 @@ Realiza el seguimiento de modelos, tokens y costos por agente en la barra latera
 ## Características
 
 - Rastrea cada modelo usado por el agente principal y todos los sub-agentes
-- Muestra el agente o sub-agente, el modelo, los tokens y el costo
+- Muestra el agente o sub-agente, el modelo y el costo
 - Sección colapsable con `Alt+M`
-- Acumula costo y tokens durante toda la sesión
+- Acumula costo durante toda la sesión
 - Los modelos de sub-agentes se atribuyen a la sesión padre
 - Persistencia vía KV — sobrevive reinicios y cambios de sesión
+
+> **⚠️ Nota sobre los tokens:** estamos trabajando para poder contar con exactitud los tokens de contexto de cada modelo. Por ahora la barra lateral solo muestra el **costo**, no la cantidad de tokens. El conteo de tokens se sigue recolectando internamente (en KV) para poder mostrarlo cuando esté listo, simplemente no se renderiza.
 
 ## Instalación
 

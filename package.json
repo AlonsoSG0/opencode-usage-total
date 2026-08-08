@@ -1,6 +1,6 @@
 {
   "name": "opencode-usage-total",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Track model usage, tokens, and costs per agent in the OpenCode TUI sidebar",
   "type": "module",
   "main": "./dist/index.js",
@@ -10,8 +10,8 @@
       "import": "./dist/index.js"
     },
     "./tui": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/tui/index.d.ts",
+      "import": "./dist/tui/index.js"
     }
   },
   "files": [

@@ -126,23 +126,35 @@ describe("fmtTokens", () => {
     expect(fmtTokens(1000)).toBe("1.0k")
   })
 
-  // Boundary fix: 999999 previously rendered "1000.0k". Now bumps to M once
-  // the formatted k-value would read "1000.0" (r >= 999950).
-  it("formats 999999 as '1.0M' (boundary fix)", () => {
-    expect(fmtTokens(999999)).toBe("1.0M")
+  // Truncation: values below 1M stay in the k band with one truncated decimal.
+  it("formats 999999 as '999.9k' (truncated, stays in k band)", () => {
+    expect(fmtTokens(999999)).toBe("999.9k")
   })
 
-  it("formats 999950 as '1.0M' (boundary lower edge)", () => {
-    expect(fmtTokens(999950)).toBe("1.0M")
+  it("formats 999950 as '999.9k' (truncated at boundary)", () => {
+    expect(fmtTokens(999950)).toBe("999.9k")
   })
 
-  it("formats 999949 as '999.9k' (just below boundary)", () => {
+  it("formats 999949 as '999.9k' (truncated below boundary)", () => {
     expect(fmtTokens(999949)).toBe("999.9k")
   })
 
-  it("formats millions with an 'M' suffix and one decimal", () => {
+  it("formats millions with an 'M' suffix and one truncated decimal", () => {
     expect(fmtTokens(1_000_000)).toBe("1.0M")
     expect(fmtTokens(1_500_000)).toBe("1.5M")
+  })
+
+  // Truncation vs rounding: toFixed(1) rounds up at the .5 boundary,
+  // but truncation never overshoots the actual token count.
+  it("truncates to one decimal — never rounds up", () => {
+    expect(fmtTokens(32_149)).toBe("32.1k")
+    expect(fmtTokens(32_150)).toBe("32.1k")
+    expect(fmtTokens(32_199)).toBe("32.1k")
+    expect(fmtTokens(32_200)).toBe("32.2k")
+  })
+
+  it("truncates float token counts by flooring first", () => {
+    expect(fmtTokens(1234.9)).toBe("1.2k")
   })
 })
 
@@ -182,12 +194,12 @@ describe("modelTokens", () => {
     expect(modelTokens(makeEntry())).toBe(0)
   })
 
-  it("returns the input count when only input is set", () => {
+  it("returns the input count", () => {
     expect(modelTokens(makeEntry({ tokensInput: 500 }))).toBe(500)
   })
 
-  // Cache tokens are excluded from the total — they're a subset of input tokens, not additional tokens.
-  it("sums input, output, and reasoning tokens (cache excluded)", () => {
+  // Only input tokens count — output, reasoning, and cache are excluded.
+  it("returns only input, excluding output/reasoning/cache", () => {
     expect(
       modelTokens(
         makeEntry({
@@ -198,24 +210,23 @@ describe("modelTokens", () => {
           tokensCacheWrite: 500,
         }),
       ),
-    ).toBe(600)
+    ).toBe(100)
   })
 
-  it("sums large numbers without overflow in the JS number range", () => {
+  it("returns 0 when input is 0 regardless of other fields", () => {
     expect(
       modelTokens(
         makeEntry({
-          tokensInput: 1_000_000_000,
+          tokensInput: 0,
           tokensOutput: 9_000_000_000,
           tokensReasoning: 1_000_000_000,
           tokensCacheRead: 5_000_000_000,
           tokensCacheWrite: 4_000_000_000,
         }),
       ),
-    ).toBe(11_000_000_000)
+    ).toBe(0)
   })
 
-  // Cache tokens are a subset of input tokens, not additional — they must not inflate the total.
   it("excludes cacheRead tokens when only cacheRead is set", () => {
     expect(modelTokens(makeEntry({ tokensCacheRead: 750 }))).toBe(0)
   })
@@ -224,58 +235,32 @@ describe("modelTokens", () => {
     expect(modelTokens(makeEntry({ tokensCacheWrite: 250 }))).toBe(0)
   })
 
-  it("excludes cacheRead and cacheWrite combined", () => {
-    expect(
-      modelTokens(
-        makeEntry({
-          tokensCacheRead: 750,
-          tokensCacheWrite: 250,
-        }),
-      ),
-    ).toBe(0)
-  })
-
-  it("does not alter the sum when cache tokens are all zero", () => {
-    expect(
-      modelTokens(
-        makeEntry({
-          tokensInput: 100,
-          tokensOutput: 200,
-          tokensReasoning: 300,
-          tokensCacheRead: 0,
-          tokensCacheWrite: 0,
-        }),
-      ),
-    ).toBe(600)
+  it("returns 0 when no input is set", () => {
+    expect(modelTokens(makeEntry({ tokensOutput: 500 }))).toBe(0)
+    expect(modelTokens(makeEntry({ tokensReasoning: 500 }))).toBe(0)
   })
 
   // A corrupt entry must never push NaN/Infinity into the render — safeNum collapses
-  // non-finite sums to 0 instead of poisoning the total.
-  it("returns 0 when any token field is NaN (safeNum guard)", () => {
+  // non-finite values to 0 instead of poisoning the total.
+  it("returns 0 when input is NaN (safeNum guard)", () => {
     expect(modelTokens(makeEntry({ tokensInput: NaN }))).toBe(0)
-    expect(modelTokens(makeEntry({ tokensOutput: NaN }))).toBe(0)
-    expect(modelTokens(makeEntry({ tokensReasoning: NaN }))).toBe(0)
-    expect(modelTokens(makeEntry({ tokensCacheRead: NaN }))).toBe(0)
-    expect(modelTokens(makeEntry({ tokensCacheWrite: NaN }))).toBe(0)
   })
 
-  it("returns 0 when any token field is Infinity (safeNum guard)", () => {
+  it("returns 0 when input is Infinity (safeNum guard)", () => {
     expect(modelTokens(makeEntry({ tokensInput: Infinity }))).toBe(0)
-    expect(modelTokens(makeEntry({ tokensOutput: -Infinity }))).toBe(0)
   })
 
-  it("zeroes the whole total when any field is NaN (whole-sum wrap)", () => {
-    // A single NaN field makes the sum NaN and safeNum collapses it to 0.
-    // Defense-in-depth: in practice upsertModel sanitizes and loadSession validates,
-    // but a render guard is still safer than propagating NaN into fmtTokens.
+  it("ignores NaN in output/reasoning/cache (not part of the sum)", () => {
     expect(
       modelTokens(
         makeEntry({
           tokensInput: 100,
           tokensOutput: NaN,
-          tokensReasoning: 300,
+          tokensReasoning: NaN,
+          tokensCacheRead: NaN,
+          tokensCacheWrite: NaN,
         }),
       ),
-    ).toBe(0)
+    ).toBe(100)
   })
 })

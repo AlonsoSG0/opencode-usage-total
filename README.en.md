@@ -7,11 +7,13 @@ Track model usage, tokens, and costs per agent in the OpenCode TUI sidebar.
 ## Features
 
 - Tracks every model used by the main agent and all sub-agents
-- Shows the agent or sub-agent, the model, tokens, and cost
+- Shows the agent or sub-agent, the model, and cost
 - Collapsible sidebar section with `Alt+M` toggle
-- Cost and token accumulation across the entire session
+- Cost accumulation across the entire session
 - Sub-agent models attributed to the parent session
 - Persisted via KV — survives restarts and session switches
+
+> **⚠️ Disclaimer on tokens:** we're working on accurately counting context tokens per model. For now the sidebar only shows **cost**, not token counts. Token data is still being collected internally (in KV) so we can show it once it's accurate — it just isn't rendered.
 
 ## Install
 

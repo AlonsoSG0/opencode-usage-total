@@ -4,3 +4,7 @@ dist/
 .DS_Store
 .atl
 .opencode
+# Local dev-iteration symlinks — see README for the dev workflow.
+# Files in dev/ point at the project root with absolute paths, so they only
+# work on the original author's machine. The published package uses dist/.
+dev/

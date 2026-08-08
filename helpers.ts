@@ -37,14 +37,12 @@ export function roundCost(n: number): number {
 export function fmtTokens(n: number): string {
   // Clamp negatives and non-finite values — a token tracker should never display negative usage.
   if (!Number.isFinite(n) || n < 0) return "0"
-  const r = Math.round(n)
+  const r = Math.floor(n)
   if (r < 1_000) return String(r)
-  // Band boundary: when the formatted k-value would read "1000.0" (r >= 999950, detected via
-  // Math.round(r / 100) >= 10000), bump to the M band to avoid the "1000.0k" display glitch.
-  if (r >= 1_000_000 || Math.round(r / 100) >= 10_000) {
-    return `${(r / 1_000_000).toFixed(1)}M`
+  if (r >= 1_000_000) {
+    return `${(Math.floor(r / 100_000) / 10).toFixed(1)}M`
   }
-  return `${(r / 1_000).toFixed(1)}k`
+  return `${(Math.floor(r / 100) / 10).toFixed(1)}k`
 }
 
 export function fmtCost(n: number): string {
@@ -55,14 +53,53 @@ export function fmtCost(n: number): string {
   return `$${n.toFixed(2)}`
 }
 
-// Cache tokens (cacheRead/cacheWrite) are stored in ModelEntry but NOT summed here.
-// The SDK reports them as a subset of input tokens, not additional tokens — adding them
-// would double-count. They're available for breakdown display but excluded from the total.
-// The sum is wrapped in safeNum so corrupt entries can never push NaN/Infinity into the render.
+// Context size = input tokens only. Output, reasoning, and cache tokens are excluded
+// because they're generation artifacts, not part of the context window.
+// Wrapped in safeNum so corrupt entries can never push NaN/Infinity into the render.
 export function modelTokens(m: ModelEntry): number {
-  return safeNum(
-    m.tokensInput +
-      m.tokensOutput +
-      m.tokensReasoning,
-  )
+  return safeNum(m.tokensInput)
+}
+
+// Matches the official opencode app's `lastAssistantWithTokens`:
+// iterates messages newest-first, returns the most recent assistant turn that
+// has any token usage reported. The plugin displays this message's `tokens`
+// as the "context size" because that's what the official UI surfaces — NOT
+// the session's accumulated `tokens`, which can include multiple turns
+// and tool-call rounds and doesn't match what the user sees in opencode.
+//
+// Caller passes `ReadonlyArray<{ role: string; tokens?: { ... } | null }>`
+// to stay decoupled from the SDK Message type.
+export interface TokenReport {
+  input?: number
+  output?: number
+  reasoning?: number
+  cache?: { read?: number; write?: number }
+}
+export interface MessageLike {
+  role: string
+  tokens?: TokenReport | null
+}
+export function tokenTotal(m: MessageLike): number {
+  const t = m.tokens
+  if (!t) return 0
+  return safeNum(t.input) + safeNum(t.output) + safeNum(t.reasoning) + safeNum(t.cache?.read) + safeNum(t.cache?.write)
+}
+export function lastAssistantWithTokens<T extends MessageLike>(messages: ReadonlyArray<T>): T | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg.role !== "assistant") continue
+    if (tokenTotal(msg) <= 0) continue
+    return msg
+  }
+  return undefined
+}
+
+// Sums the cost field of every assistant message in a session. Mirrors the
+// official app's `totalCost` in session-context-metrics.ts, which is per-message
+// (assistantMessage.cost is already accumulated per message by the processor).
+// Using `session.cost` directly would be wrong because the in-memory state
+// exposed by `api.state.session.get()` lags behind the DB on session.updated
+// gaps, while the messages array is updated incrementally.
+export function sumAssistantCost(messages: ReadonlyArray<MessageLike & { cost?: number }>): number {
+  return messages.reduce((sum, m) => (m.role === "assistant" ? sum + safeNum(m.cost) : sum), 0)
 }

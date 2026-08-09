@@ -12,7 +12,6 @@ export default defineConfig({
   external: [
     "@opencode-ai/plugin",
     "@opentui/core",
-    "@opentui/keymap",
     "@opentui/solid",
     "solid-js",
   ],

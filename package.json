@@ -42,9 +42,9 @@
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.14.50 <2",
-    "@opentui/core": ">=0.4.0 <0.5",
-    "@opentui/solid": ">=0.4.0 <0.5",
-    "solid-js": ">=1.9.12 <2"
+    "@opentui/core": ">=0.4.0 <0.6",
+    "@opentui/solid": ">=0.4.0 <0.6",
+    "solid-js": ">=1.9.10 <2"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.17.8",

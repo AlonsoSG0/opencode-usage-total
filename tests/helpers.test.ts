@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest"
 import {
   fmtCost,
   fmtTokens,
+  lastAssistantWithTokens,
   modelTokens,
   roundCost,
   safeNum,
+  sumAssistantCost,
+  tokenTotal,
+  totalTreeCost,
   type ModelEntry,
 } from "../helpers"
 
@@ -262,5 +266,129 @@ describe("modelTokens", () => {
         }),
       ),
     ).toBe(100)
+  })
+})
+
+describe("tokenTotal", () => {
+  it("returns 0 for a message with no tokens", () => {
+    expect(tokenTotal({ role: "assistant" })).toBe(0)
+  })
+
+  it("returns 0 for a message with null tokens", () => {
+    expect(tokenTotal({ role: "assistant", tokens: null })).toBe(0)
+  })
+
+  it("sums input, output, reasoning, and cache tokens", () => {
+    expect(
+      tokenTotal({
+        role: "assistant",
+        tokens: {
+          input: 100,
+          output: 200,
+          reasoning: 50,
+          cache: { read: 30, write: 20 },
+        },
+      }),
+    ).toBe(400)
+  })
+
+  it("sums a partial token report with a missing cache", () => {
+    expect(tokenTotal({ role: "assistant", tokens: { input: 10 } })).toBe(10)
+  })
+
+  it("collapses non-finite token fields to 0", () => {
+    expect(
+      tokenTotal({ role: "assistant", tokens: { input: NaN, output: Infinity } }),
+    ).toBe(0)
+  })
+})
+
+describe("lastAssistantWithTokens", () => {
+  function assistant(over: Record<string, unknown> = {}) {
+    return { role: "assistant", tokens: { input: 1 }, ...over }
+  }
+
+  it("returns undefined for an empty message list", () => {
+    expect(lastAssistantWithTokens([])).toBeUndefined()
+  })
+
+  it("returns the most recent assistant message with tokens", () => {
+    const messages = [
+      { role: "user", tokens: { input: 5 } },
+      assistant({ id: 1 }),
+      { role: "tool", tokens: null },
+      assistant({ id: 2, tokens: { input: 7 } }),
+    ]
+    expect(lastAssistantWithTokens(messages)?.id).toBe(2)
+  })
+
+  it("skips assistant messages with null/absent token usage", () => {
+    const messages = [
+      assistant({ id: 1, tokens: null }),
+      { role: "user" },
+      assistant({ id: 2, tokens: { output: 9 } }),
+    ]
+    expect(lastAssistantWithTokens(messages)?.id).toBe(2)
+  })
+
+  it("returns undefined when the only assistant message has zero tokens", () => {
+    expect(
+      lastAssistantWithTokens([assistant({ id: 1, tokens: { input: 0 } })]),
+    ).toBeUndefined()
+  })
+})
+
+describe("sumAssistantCost", () => {
+  it("returns 0 for an empty list", () => {
+    expect(sumAssistantCost([])).toBe(0)
+  })
+
+  it("sums assistant message costs and ignores user/tool messages", () => {
+    const messages = [
+      { role: "user", cost: 5 },
+      { role: "assistant", cost: 0.3 },
+      { role: "tool", cost: 2 },
+      { role: "assistant", cost: 0.2 },
+    ]
+    expect(sumAssistantCost(messages)).toBeCloseTo(0.5, 10)
+  })
+
+  it("collapses a non-finite assistant cost to 0", () => {
+    expect(sumAssistantCost([{ role: "assistant", cost: NaN }])).toBe(0)
+  })
+})
+
+describe("totalTreeCost", () => {
+  it("returns 0 for an empty list", () => {
+    expect(totalTreeCost([])).toBe(0)
+  })
+
+  it("sums a single root entry", () => {
+    expect(totalTreeCost([makeEntry({ cost: 0.5 })])).toBeCloseTo(0.5, 10)
+  })
+
+  it("sums root plus sub-agent entries walked up from child sessions", () => {
+    const models = [
+      makeEntry({ cost: 0.5, agent: "primary" }),
+      makeEntry({ cost: 0.3, agent: "sub:primary", sourceSessionID: "a" }),
+      makeEntry({ cost: 0.2, agent: "sub:explore", sourceSessionID: "b" }),
+    ]
+    expect(totalTreeCost(models)).toBeCloseTo(1.0, 10)
+  })
+
+  it("sums both parallel sub-agents even when provider/model/agent are identical", () => {
+    // Two sub-agents ran the same model under the same agent. Only
+    // sourceSessionID distinguishes them; both costs must reach the total.
+    const models = [
+      makeEntry({ cost: 0.1, sourceSessionID: "subA" }),
+      makeEntry({ cost: 0.2, sourceSessionID: "subB" }),
+    ]
+    expect(totalTreeCost(models)).toBeCloseTo(0.3, 10)
+  })
+
+  it("collapses a corrupt NaN cost to 0 instead of poisoning the total", () => {
+    expect(
+      totalTreeCost([makeEntry({ cost: NaN }), makeEntry({ cost: 0.5 })]),
+    ).toBeCloseTo(0.5, 10)
   })
 })

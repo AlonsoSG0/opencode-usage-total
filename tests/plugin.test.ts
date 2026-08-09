@@ -272,13 +272,17 @@ function makeMockApi(opts: { withOnDispose?: boolean } = {}): MockApi {
 }
 
 // ---- Captured-resource accessors ----
+// The plugin registers three handlers (session.updated, message.updated,
+// session.idle). Look the handler up by event name instead of returning the
+// last registration — the last one is session.idle, which silently made every
+// test that called getHandler() exercise the idle handler while claiming to
+// test session.updated.
 function getHandler(
   m: MockApi,
+  event: "session.updated" | "message.updated" | "session.idle" = "session.updated",
 ): ((e: MockSessionUpdatedEvent) => void) | undefined {
-  const calls = m.eventOn.mock.calls
-  const last = calls[calls.length - 1]
-  if (!last) return undefined
-  return last[1] as (e: MockSessionUpdatedEvent) => void
+  const call = m.eventOn.mock.calls.find(([type]) => type === event)
+  return call?.[1] as ((e: MockSessionUpdatedEvent) => void) | undefined
 }
 
 type SidebarRender = (
@@ -574,6 +578,29 @@ describe("parent-chain attribution", () => {
     expect(modelsSavedFor(m, "solo")).toBeDefined()
     expect(m.kvSet.mock.calls).toHaveLength(1)
   })
+
+  it("parallel sub-agents with the same provider/model/agent keep separate root entries", async () => {
+    // Two sub-agents that both run the same model as agent "primary" walk up to
+    // root with the same `sub:primary` dedupe key. Without sourceSessionID they
+    // would REPLACE each other and the root total would understate the tree.
+    const m = makeMockApi()
+    m.sessionParents.set("subA", "root")
+    m.sessionParents.set("subB", "root")
+    await init(m)
+    const handler = getHandler(m)!
+
+    handler(sessionEvent("subA", { cost: 0.1, tokens: { input: 100, output: 200 } }))
+    handler(sessionEvent("subB", { cost: 0.2, tokens: { input: 300, output: 400 } }))
+    vi.advanceTimersByTime(500)
+
+    const root = modelsSavedFor(m, "root")!
+    const subEntries = root.filter((e) => e.agent === "sub:primary")
+    // Both sub-agents coexist instead of one clobbering the other.
+    expect(subEntries).toHaveLength(2)
+    expect(subEntries.map((e) => e.cost).sort()).toEqual([0.1, 0.2])
+    // Each is tagged with its own origin session.
+    expect(new Set(subEntries.map((e) => e.sourceSessionID)).size).toBe(2)
+  })
 })
 
 // =====================================================================
@@ -854,6 +881,81 @@ describe("loadSession validation (B2)", () => {
     expect(
       m.toast.mock.calls.some((c) => c[0].variant === "warning"),
     ).toBe(true)
+  })
+})
+
+// =====================================================================
+// KV load on the event path (fix: no clobber for unrendered sessions)
+// =====================================================================
+describe("KV load on the event path", () => {
+  it("loads persisted KV for a session that never rendered before upserting", async () => {
+    const m = makeMockApi()
+    // KV already holds one persisted entry for s1, but s1 is never rendered.
+    const saved: ModelEntry[] = [
+      {
+        provider: "openai",
+        model: "gpt-4o",
+        agent: "primary",
+        cost: 0.5,
+        tokensInput: 1000,
+        tokensOutput: 500,
+        tokensReasoning: 0,
+        tokensCacheRead: 0,
+        tokensCacheWrite: 0,
+      },
+    ]
+    m.kvGet.mockImplementation((key) =>
+      key === kvKey("s1") ? saved : undefined,
+    )
+    await init(m)
+
+    // An event fires for a background/unrendered session. No render call at all.
+    const handler = getHandler(m)!
+    handler(
+      sessionEvent("s1", {
+        model: { providerID: "anthropic", id: "claude-3-7-sonnet" },
+      }),
+    )
+    vi.advanceTimersByTime(500)
+
+    const models = modelsSavedFor(m, "s1")!
+    // If loadSession hadn't run on the event path, the upsert would start from
+    // empty in-memory state and the flush would overwrite persisted KV with a
+    // partial array containing only the new entry.
+    expect(models).toHaveLength(2)
+    expect(models.some((x) => x.model === "gpt-4o")).toBe(true)
+    expect(models.some((x) => x.model === "claude-3-7-sonnet")).toBe(true)
+  })
+
+  it("loads persisted KV for all three event handlers", async () => {
+    const m = makeMockApi()
+    const saved: ModelEntry[] = [
+      {
+        provider: "openai",
+        model: "gpt-4o",
+        agent: "primary",
+        cost: 0.5,
+        tokensInput: 1000,
+        tokensOutput: 500,
+        tokensReasoning: 0,
+        tokensCacheRead: 0,
+        tokensCacheWrite: 0,
+      },
+    ]
+    m.kvGet.mockImplementation((key) =>
+      key === kvKey("s1") ? saved : undefined,
+    )
+    await init(m)
+
+    // The same session never rendered; each handler must still merge its upsert
+    // on top of the persisted entry, not replace it.
+    getHandler(m, "message.updated")!(sessionEvent("s1"))
+    getHandler(m, "session.idle")!(sessionEvent("s1"))
+    vi.advanceTimersByTime(500)
+
+    const models = modelsSavedFor(m, "s1")!
+    expect(models).toHaveLength(2)
+    expect(models.some((x) => x.model === "gpt-4o")).toBe(true)
   })
 })
 

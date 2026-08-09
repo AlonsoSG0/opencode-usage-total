@@ -14,6 +14,7 @@ import {
   safeNum,
   sumAssistantCost,
   tokenTotal,
+  totalTreeCost,
 } from "./helpers"
 
 // ---- Constants ----
@@ -175,6 +176,10 @@ const tui: TuiPlugin = async (api) => {
                 typeof m?.provider === "string" &&
                 typeof m?.model === "string" &&
                 typeof m?.agent === "string" &&
+                // sourceSessionID is optional: older KV entries predate it, and
+                // root entries never carry it. Only enforce the type when present.
+                (m?.sourceSessionID === undefined ||
+                  typeof m?.sourceSessionID === "string") &&
                 Number.isFinite(m?.cost) &&
                 Number.isFinite(m?.tokensInput) &&
                 Number.isFinite(m?.tokensOutput) &&
@@ -206,11 +211,20 @@ const tui: TuiPlugin = async (api) => {
           cacheWrite?: number
         },
       ) {
-        const dedupeKey = `${entry.provider}/${entry.model}/${entry.agent}`
+        // Root entries dedupe on provider/model/agent as before. `sub:` entries
+        // additionally key on sourceSessionID so two parallel sub-agents running
+        // the same provider/model/agent don't collide on the root and REPLACE
+        // each other — each keeps its own slot and both reach the total.
+        const dedupeKey = `${entry.provider}/${entry.model}/${entry.agent}${
+          entry.sourceSessionID ? `/${entry.sourceSessionID}` : ""
+        }`
         const current = modelState()
         const sessionModels = [...(current[sessionID] ?? [])]
         const existingIdx = sessionModels.findIndex(
-          (m) => `${m.provider}/${m.model}/${m.agent}` === dedupeKey,
+          (m) =>
+            `${m.provider}/${m.model}/${m.agent}${
+              m.sourceSessionID ? `/${m.sourceSessionID}` : ""
+            }` === dedupeKey,
         )
 
         // Guard against NaN/Infinity that would corrupt accumulators and KV
@@ -298,7 +312,14 @@ const tui: TuiPlugin = async (api) => {
         if (cursor !== eventSessionID) {
           upsertModel(
             cursor,
-            { ...entry, agent: `sub:${entry.agent}` },
+            {
+              ...entry,
+              agent: `sub:${entry.agent}`,
+              // Tag the walked entry with the child session so two parallel
+              // sub-agents with the same provider/model/agent dedupe separately
+              // instead of REPLACING each other on the root.
+              sourceSessionID: eventSessionID,
+            },
             cost,
             tokens,
           )
@@ -353,6 +374,14 @@ const tui: TuiPlugin = async (api) => {
       const handleRefresh = (sessionID: string | undefined) => {
         if (!sessionID) return
         try {
+          // A session's only KV read must happen BEFORE any upsert. Event
+          // handlers fire for sessions that were never rendered (sub-agents,
+          // background sessions); without this, the first upsert would run
+          // against empty in-memory state and the debounced flush would
+          // overwrite the persisted KV with a partial array. loadSession is
+          // idempotent via loadedSessions, so this is a one-time read per
+          // session.
+          loadSession(sessionID)
           refreshFromState(sessionID)
         } catch {
           if (Date.now() - lastErrorToastTime > 2000) {
@@ -418,7 +447,7 @@ const tui: TuiPlugin = async (api) => {
             // (prefixed with `sub:`). Each sub-agent's cost lives exactly
             // once in this array, so summing everything yields the true
             // tree total — no double counting.
-            const totalCost = models.reduce((sum, m) => sum + m.cost, 0)
+            const totalCost = totalTreeCost(models)
             // Context size comes from the API directly — use the first non-sub-agent
             // model's tokens, don't sum across models (context size isn't additive
             // the way cost is).

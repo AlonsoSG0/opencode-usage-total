@@ -5,6 +5,11 @@ export interface ModelEntry {
   provider: string
   model: string
   agent: string
+  // Origin session for `sub:` entries walked up from child sessions. Parallel
+  // sub-agents sharing the same provider/model/agent would otherwise collide
+  // on the same dedupe key and REPLACE each other, understating the total.
+  // Optional so KV written by older schema versions keeps validating.
+  sourceSessionID?: string
   cost: number
   tokensInput: number
   tokensOutput: number
@@ -102,4 +107,13 @@ export function lastAssistantWithTokens<T extends MessageLike>(messages: Readonl
 // gaps, while the messages array is updated incrementally.
 export function sumAssistantCost(messages: ReadonlyArray<MessageLike & { cost?: number }>): number {
   return messages.reduce((sum, m) => (m.role === "assistant" ? sum + safeNum(m.cost) : sum), 0)
+}
+
+// Total cost of a session's model tree: the sum of EVERY entry — root models
+// plus `sub:` entries copied up from child sessions. Each sub-agent's cost
+// lives exactly once in the array, so summing everything yields the true tree
+// total with no double counting. Wrapped in safeNum so a corrupt entry can
+// never push NaN/Infinity into the render.
+export function totalTreeCost(models: ReadonlyArray<ModelEntry>): number {
+  return models.reduce((sum, m) => sum + safeNum(m.cost), 0)
 }

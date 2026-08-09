@@ -402,7 +402,7 @@ const tui: TuiPlugin = async (api) => {
               return (
                 <box flexDirection="column">
                   <text fg={ctx.theme.current.text}>
-                    🧠 Modelss
+                    🧠 Models
                   </text>
                   <text fg={ctx.theme.current.textMuted}>
                     {sessionID
@@ -413,14 +413,12 @@ const tui: TuiPlugin = async (api) => {
               )
             }
 
-            // Total cost is summed only across root entries (no `sub:` prefix).
-            // Sub-agent entries are surfaced for visibility but excluded from the
-            // root's total — they live in their own session, where the user sees
-            // them directly. Without this filter, a sub-agent's cost would be
-            // double-counted (once in its own session, once in the root).
-            const totalCost = models
-              .filter((m) => !m.agent.startsWith("sub:"))
-              .reduce((sum, m) => sum + m.cost, 0)
+            // Total cost is the sum of every entry in this session: root
+            // models plus sub-agent models copied up from child sessions
+            // (prefixed with `sub:`). Each sub-agent's cost lives exactly
+            // once in this array, so summing everything yields the true
+            // tree total — no double counting.
+            const totalCost = models.reduce((sum, m) => sum + m.cost, 0)
             // Context size comes from the API directly — use the first non-sub-agent
             // model's tokens, don't sum across models (context size isn't additive
             // the way cost is).
@@ -442,7 +440,7 @@ const tui: TuiPlugin = async (api) => {
                 >
                   <box flexDirection="row">
                     <text fg={ctx.theme.current.text}>
-                      {expanded() ? "▼" : "▶"} 🧠 Modelss
+                      {expanded() ? "▼" : "▶"} 🧠 Models
                     </text>
                     <text fg={ctx.theme.current.textMuted}> {version}</text>
                   </box>

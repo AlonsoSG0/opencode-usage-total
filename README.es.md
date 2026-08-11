@@ -28,19 +28,7 @@ Plugin de TUI para [OpenCode](https://opencode.ai) que muestra cada modelo usado
 opencode plugin -g opencode-usage-total
 ```
 
-> [!NOTE]
-> El instalador registra el paquete en `opencode.json`, pero la barra lateral del TUI necesita su propia entrada. Agréguela a su `tui.json` global (cree el archivo si no existe):
-
-```json
-{
-  "$schema": "https://opencode.ai/tui.json",
-  "plugin": [
-    "opencode-usage-total/tui"
-  ]
-}
-```
-
-Reinicie opencode después.
+El comando registra tanto la entrada del server como la de la barra lateral del TUI en su configuración global. Reinicie opencode después.
 
 ## Actualización
 

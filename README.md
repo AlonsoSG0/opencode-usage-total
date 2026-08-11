@@ -28,19 +28,7 @@ A TUI plugin for [OpenCode](https://opencode.ai) that shows every model used by 
 opencode plugin -g opencode-usage-total
 ```
 
-> [!NOTE]
-> The installer registers the package in `opencode.json`, but the TUI sidebar needs its own entry. Add it to your global `tui.json` (create the file if it does not exist):
-
-```json
-{
-  "$schema": "https://opencode.ai/tui.json",
-  "plugin": [
-    "opencode-usage-total/tui"
-  ]
-}
-```
-
-Restart opencode afterwards.
+The command registers both the server and the TUI sidebar entry in your global config. Restart opencode afterwards.
 
 ## Update
 
